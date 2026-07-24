@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Res Switcher.vcxproj" Id="e8ed7f70-5654-403f-bd27-a62d0a10b5f8" />
+</Solution>
