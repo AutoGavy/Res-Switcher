@@ -7,8 +7,8 @@
 
 namespace {
 
-constexpr DWORD kFullHdWidth = 2560;
-constexpr DWORD kFullHdHeight = 1440;
+constexpr DWORD kFullHdWidth = 1920;
+constexpr DWORD kFullHdHeight = 1080;
 constexpr DWORD kUltraHdWidth = 3840;
 constexpr DWORD kUltraHdHeight = 2160;
 
