@@ -7,7 +7,7 @@
 
 namespace {
 
-constexpr DWORD kFullHdWidth = 1920;
+constexpr DWORD kFullHdWidth = 1720;
 constexpr DWORD kFullHdHeight = 1080;
 constexpr DWORD kUltraHdWidth = 3840;
 constexpr DWORD kUltraHdHeight = 2160;
@@ -81,6 +81,17 @@ std::optional<DEVMODEW> FindBestTargetMode(
         }
 
         if (!HasResolution(candidate, targetResolution)) {
+            continue;
+        }
+
+        // EnumDisplaySettings can include modes advertised by the driver that
+        // the current connection, color depth, or display topology cannot use.
+        if (ChangeDisplaySettingsExW(
+                deviceName,
+                &candidate,
+                nullptr,
+                CDS_TEST,
+                nullptr) != DISP_CHANGE_SUCCESSFUL) {
             continue;
         }
 
@@ -194,8 +205,8 @@ int wmain(const int argc, wchar_t* argv[]) {
 
     if (!selectedMode) {
         std::wcerr
-            << L"Error: " << targetResolution.width << L'x' << targetResolution.height
-            << L" is not available for the primary display.\n";
+            << L"Error: no usable " << targetResolution.width << L'x'
+            << targetResolution.height << L" graphics mode was found.\n";
         WaitWhenOpenedDirectly(openedDirectly, false);
         return 1;
     }
@@ -206,20 +217,9 @@ int wmain(const int argc, wchar_t* argv[]) {
         return 0;
     }
 
-    // Start from the current mode so orientation and monitor position are kept,
-    // then copy only the values needed for the chosen graphics mode.
-    DEVMODEW target = *current;
-    target.dmPelsWidth = selectedMode->dmPelsWidth;
-    target.dmPelsHeight = selectedMode->dmPelsHeight;
-    target.dmBitsPerPel = selectedMode->dmBitsPerPel;
-    target.dmDisplayFrequency = selectedMode->dmDisplayFrequency;
-    target.dmDisplayFlags = selectedMode->dmDisplayFlags;
-    target.dmFields |=
-        DM_PELSWIDTH |
-        DM_PELSHEIGHT |
-        DM_BITSPERPEL |
-        DM_DISPLAYFREQUENCY |
-        DM_DISPLAYFLAGS;
+    // Use the complete mode returned by the driver. Rebuilding it from the
+    // current mode can retain scaling-specific fields that reject the target.
+    DEVMODEW target = *selectedMode;
 
     const LONG testResult = ChangeDisplaySettingsExW(
         display->DeviceName,
