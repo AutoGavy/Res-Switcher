@@ -7,15 +7,16 @@
 
 namespace {
 
-constexpr DWORD kFullHdWidth = 1720;
-constexpr DWORD kFullHdHeight = 1080;
-constexpr DWORD kUltraHdWidth = 3840;
-constexpr DWORD kUltraHdHeight = 2160;
-
 struct Resolution {
     DWORD width;
     DWORD height;
 };
+
+constexpr Resolution kDefaultLowerResolution{1720, 1080};
+constexpr Resolution k1050Resolution{1680, 1050};
+constexpr Resolution k1080Resolution{1920, 1080};
+constexpr Resolution k1440Resolution{2560, 1440};
+constexpr Resolution kUltraHdResolution{3840, 2160};
 
 bool HasResolution(const DEVMODEW& mode, const Resolution resolution) {
     return mode.dmPelsWidth == resolution.width &&
@@ -149,8 +150,13 @@ void WaitWhenOpenedDirectly(const bool shouldWait, const bool success) {
 void PrintHelp() {
     std::wcout
         << L"Resolution Switcher\n\n"
-        << L"Double-click the executable to toggle the primary display between\n"
-        << L"1920x1080 and 3840x2160.\n\n"
+        << L"Toggle the primary display between a selected lower resolution\n"
+        << L"and 3840x2160. Without a resolution option, the lower resolution\n"
+        << L"is 1720x1080.\n\n"
+        << L"Resolution options:\n"
+        << L"  -1050      Toggle between 1680x1050 and 3840x2160.\n"
+        << L"  -1080      Toggle between 1920x1080 and 3840x2160.\n"
+        << L"  -1440      Toggle between 2560x1440 and 3840x2160.\n\n"
         << L"Options:\n"
         << L"  --dry-run  Show the selected mode without changing the display.\n"
         << L"  --help     Show this help text.\n";
@@ -161,6 +167,8 @@ void PrintHelp() {
 int wmain(const int argc, wchar_t* argv[]) {
     const bool openedDirectly = argc == 1;
     bool dryRun = false;
+    Resolution lowerResolution = kDefaultLowerResolution;
+    bool hasResolutionOption = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::wstring_view argument{argv[index]};
@@ -169,6 +177,24 @@ int wmain(const int argc, wchar_t* argv[]) {
         } else if (argument == L"--help" || argument == L"-h") {
             PrintHelp();
             return 0;
+        } else if (
+            argument == L"-1050" ||
+            argument == L"-1080" ||
+            argument == L"-1440") {
+            if (hasResolutionOption) {
+                std::wcerr << L"Error: specify only one resolution option.\n\n";
+                PrintHelp();
+                return 2;
+            }
+
+            hasResolutionOption = true;
+            if (argument == L"-1050") {
+                lowerResolution = k1050Resolution;
+            } else if (argument == L"-1080") {
+                lowerResolution = k1080Resolution;
+            } else {
+                lowerResolution = k1440Resolution;
+            }
         } else {
             std::wcerr << L"Unknown option: " << argument << L"\n\n";
             PrintHelp();
@@ -190,11 +216,9 @@ int wmain(const int argc, wchar_t* argv[]) {
         return 1;
     }
 
-    const Resolution targetResolution = HasResolution(
-        *current,
-        {kUltraHdWidth, kUltraHdHeight})
-        ? Resolution{kFullHdWidth, kFullHdHeight}
-        : Resolution{kUltraHdWidth, kUltraHdHeight};
+    const Resolution targetResolution = HasResolution(*current, kUltraHdResolution)
+        ? lowerResolution
+        : kUltraHdResolution;
 
     const auto selectedMode = FindBestTargetMode(
         display->DeviceName,
