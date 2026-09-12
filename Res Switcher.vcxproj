@@ -149,8 +149,11 @@
 
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="nv_color_state.cpp" />
+    <ClInclude Include="nv_color_state.h" />
     <ResourceCompile Include="res.rc" />
     <Image Include="res.ico" />
+    <None Include="third_party\NVAPI-LICENSE.txt" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
