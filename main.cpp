@@ -205,10 +205,7 @@ bool NotifySettingsChange() {
 }
 
 DWORD TargetDpiPercent(const Resolution resolution) {
-    return resolution.height == kUltraHdResolution.height ||
-               resolution.height == k1440Resolution.height
-        ? 150
-        : 125;
+    return resolution.height == kUltraHdResolution.height ? 150 : 125;
 }
 
 std::optional<DEVMODEW> FindPreservingTargetMode(
@@ -344,8 +341,8 @@ void PrintHelp() {
         << L"  -1080      Toggle between 1920x1080 and 3840x2160.\n"
         << L"  -1440      Toggle between 2560x1440 and 3840x2160.\n\n"
         << L"Scaling:\n"
-        << L"  150%       2560x1440 and 3840x2160.\n"
-        << L"  125%       All lower-resolution modes.\n\n"
+        << L"  150%       3840x2160.\n"
+        << L"  125%       All lower-resolution modes, including 2560x1440.\n\n"
         << L"Options:\n"
         << L"  --dry-run  Show the selected mode without changing the display.\n"
         << L"  --help     Show this help text.\n";

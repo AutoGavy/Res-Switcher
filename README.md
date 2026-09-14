@@ -14,8 +14,8 @@ A small Windows command-line tool that switches the primary display between
 Add `--dry-run` to preview the change. Without a resolution option, the program
 switches between `1720x1080` and `3840x2160`.
 
-The display scale is set to 150% at `3840x2160` and `2560x1440`, and 125% at
-`1920x1080`, `1680x1050`, and the default `1720x1080` mode.
+The display scale is set to 150% at `3840x2160` and 125% at all lower
+resolutions, including `2560x1440`.
 
 The switch is cancelled if the current refresh rate or NVIDIA color settings
 cannot be preserved.
