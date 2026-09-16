@@ -19,3 +19,8 @@ resolutions, including `2560x1440`.
 
 The switch is cancelled if the current refresh rate or NVIDIA color settings
 cannot be preserved.
+
+If the same monitor is connected through NVIDIA DisplayPort and another GPU's
+HDMI output, Res Switcher forces the NVIDIA DisplayPort path and removes the
+other GPU's active clone before switching resolution. The HDMI cable remains
+connected and can still be re-enabled manually as a backup display path.
