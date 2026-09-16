@@ -556,6 +556,11 @@ bool NotifySettingsChange() {
 }
 
 DWORD TargetDpiPercent(const Resolution resolution) {
+    if (resolution.width == k1440Resolution.width &&
+        resolution.height == k1440Resolution.height) {
+        return 100;
+    }
+
     return resolution.height == kUltraHdResolution.height ? 150 : 125;
 }
 
@@ -705,7 +710,8 @@ void PrintHelp() {
         << L"  -1440      Toggle between 2560x1440 and 3840x2160.\n\n"
         << L"Scaling:\n"
         << L"  150%       3840x2160.\n"
-        << L"  125%       All lower-resolution modes, including 2560x1440.\n\n"
+        << L"  100%       2560x1440.\n"
+        << L"  125%       Other lower-resolution modes.\n\n"
         << L"Options:\n"
         << L"  --dry-run  Show the selected mode without changing the display.\n"
         << L"  --help     Show this help text.\n";
