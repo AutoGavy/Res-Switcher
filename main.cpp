@@ -555,14 +555,24 @@ bool NotifySettingsChange() {
                &result) != 0;
 }
 
-DWORD TargetDpiPercent(const Resolution resolution) {
-    if (resolution.width == k1440Resolution.width &&
-        resolution.height == k1440Resolution.height) {
+constexpr DWORD TargetDpiPercent(const Resolution resolution) {
+    if (resolution.width == kDefaultLowerResolution.width &&
+        resolution.height == kDefaultLowerResolution.height) {
+        return 100;
+    }
+    if (resolution.width == k1080Resolution.width &&
+        resolution.height == k1080Resolution.height) {
         return 100;
     }
 
     return resolution.height == kUltraHdResolution.height ? 150 : 125;
 }
+
+static_assert(TargetDpiPercent(kDefaultLowerResolution) == 100);
+static_assert(TargetDpiPercent(k1080Resolution) == 100);
+static_assert(TargetDpiPercent(k1440Resolution) == 125);
+static_assert(TargetDpiPercent(kUltraHdResolution) == 150);
+static_assert(TargetDpiPercent(k1050Resolution) == 125);
 
 std::optional<DEVMODEW> FindPreservingTargetMode(
     const wchar_t* deviceName,
@@ -710,8 +720,8 @@ void PrintHelp() {
         << L"  -1440      Toggle between 2560x1440 and 3840x2160.\n\n"
         << L"Scaling:\n"
         << L"  150%       3840x2160.\n"
-        << L"  100%       2560x1440.\n"
-        << L"  125%       Other lower-resolution modes.\n\n"
+        << L"  100%       1720x1080 and 1920x1080.\n"
+        << L"  125%       1680x1050 and 2560x1440.\n\n"
         << L"Options:\n"
         << L"  --dry-run  Show the selected mode without changing the display.\n"
         << L"  --help     Show this help text.\n";
