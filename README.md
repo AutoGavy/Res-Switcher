@@ -14,11 +14,16 @@ A small Windows command-line tool that switches the primary display between
 Add `--dry-run` to preview the change. Without a resolution option, the program
 switches between `1720x1080` and `3840x2160`.
 
+If the primary display is not at 240 Hz, running any resolution profile first
+targets `3840x2160 @ 240 Hz`, even when already at 3840x2160. At 240 Hz, the
+selected lower resolution and 3840x2160 toggle normally. `--dry-run` never
+changes the display, and `--help` only prints usage.
+
 The display scale is set to 150% at `3840x2160`, 100% at `1720x1080` and
 `1920x1080`, and 125% at `1680x1050` and `2560x1440`.
 
-The switch is cancelled if the current refresh rate or NVIDIA color settings
-cannot be preserved.
+The switch is cancelled if the target 240 Hz mode is unavailable at the current
+desktop color depth, or the NVIDIA color settings cannot be preserved.
 
 If the same monitor is connected through NVIDIA DisplayPort and another GPU's
 HDMI output, Res Switcher forces the NVIDIA DisplayPort path and removes the

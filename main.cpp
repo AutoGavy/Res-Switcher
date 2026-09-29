@@ -20,6 +20,7 @@ constexpr Resolution k1050Resolution{1680, 1050};
 constexpr Resolution k1080Resolution{1920, 1080};
 constexpr Resolution k1440Resolution{2560, 1440};
 constexpr Resolution kUltraHdResolution{3840, 2160};
+constexpr DWORD kPreferredRefreshHz = 240;
 
 constexpr DWORD kDpiScaleValues[] = {
     100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500
@@ -67,6 +68,38 @@ bool HasResolution(const DEVMODEW& mode, const Resolution resolution) {
     return mode.dmPelsWidth == resolution.width &&
            mode.dmPelsHeight == resolution.height;
 }
+
+constexpr bool SameResolution(const Resolution left, const Resolution right) {
+    return left.width == right.width && left.height == right.height;
+}
+
+constexpr Resolution SelectTargetResolution(
+    const Resolution current,
+    const Resolution lower,
+    const DWORD currentRefreshHz) {
+    if (currentRefreshHz != kPreferredRefreshHz) {
+        return kUltraHdResolution;
+    }
+    return SameResolution(current, kUltraHdResolution)
+        ? lower
+        : SameResolution(current, lower) ? kUltraHdResolution : lower;
+}
+
+static_assert(SameResolution(
+    SelectTargetResolution(k1080Resolution, k1440Resolution, 144),
+    kUltraHdResolution));
+static_assert(SameResolution(
+    SelectTargetResolution(kUltraHdResolution, k1080Resolution, 60),
+    kUltraHdResolution));
+static_assert(SameResolution(
+    SelectTargetResolution(kUltraHdResolution, k1080Resolution, 240),
+    k1080Resolution));
+static_assert(SameResolution(
+    SelectTargetResolution(k1080Resolution, k1080Resolution, 240),
+    kUltraHdResolution));
+static_assert(SameResolution(
+    SelectTargetResolution(k1080Resolution, k1440Resolution, 240),
+    k1440Resolution));
 
 std::optional<DISPLAY_DEVICEW> FindPrimaryDisplay() {
     for (DWORD index = 0;; ++index) {
@@ -577,7 +610,8 @@ static_assert(TargetDpiPercent(k1050Resolution) == 125);
 std::optional<DEVMODEW> FindPreservingTargetMode(
     const wchar_t* deviceName,
     const DEVMODEW& current,
-    const Resolution targetResolution) {
+    const Resolution targetResolution,
+    const DWORD targetRefreshHz) {
     for (DWORD index = 0;; ++index) {
         DEVMODEW candidate{};
         candidate.dmSize = sizeof(candidate);
@@ -587,7 +621,7 @@ std::optional<DEVMODEW> FindPreservingTargetMode(
         }
 
         if (!HasResolution(candidate, targetResolution) ||
-            candidate.dmDisplayFrequency != current.dmDisplayFrequency ||
+            candidate.dmDisplayFrequency != targetRefreshHz ||
             candidate.dmBitsPerPel != current.dmBitsPerPel ||
             (candidate.dmDisplayFlags & DM_INTERLACED) !=
                 (current.dmDisplayFlags & DM_INTERLACED)) {
@@ -713,7 +747,8 @@ void PrintHelp() {
         << L"Resolution Switcher\n\n"
         << L"Toggle the primary display between a selected lower resolution\n"
         << L"and 3840x2160. Without a resolution option, the lower resolution\n"
-        << L"is 1720x1080.\n\n"
+        << L"is 1720x1080. At any refresh rate other than 240 Hz,\n"
+        << L"switch to 3840x2160 at 240 Hz regardless of resolution option.\n\n"
         << L"Resolution options:\n"
         << L"  -1050      Toggle between 1680x1050 and 3840x2160.\n"
         << L"  -1080      Toggle between 1920x1080 and 3840x2160.\n"
@@ -801,13 +836,14 @@ int wmain(const int argc, wchar_t* argv[]) {
         return 1;
     }
 
-    const Resolution targetResolution = HasResolution(*current, kUltraHdResolution)
-        ? lowerResolution
-        : kUltraHdResolution;
-
     const Resolution currentResolution{
         current->dmPelsWidth,
         current->dmPelsHeight};
+    const Resolution targetResolution = SelectTargetResolution(
+        currentResolution,
+        lowerResolution,
+        current->dmDisplayFrequency);
+    const DWORD targetRefreshHz = kPreferredRefreshHz;
     bool wouldForceNvidiaDisplayPort = false;
     const auto primaryDatabaseSource = FindDatabaseDisplaySource(
         display->DeviceName);
@@ -964,16 +1000,19 @@ int wmain(const int argc, wchar_t* argv[]) {
         DEVMODEW preview = *current;
         preview.dmPelsWidth = targetResolution.width;
         preview.dmPelsHeight = targetResolution.height;
+        preview.dmDisplayFrequency = targetRefreshHz;
         selectedMode = preview;
     } else {
         originalControlMode = FindPreservingTargetMode(
             displayControl->deviceName.c_str(),
             *current,
-            currentResolution);
+            currentResolution,
+            current->dmDisplayFrequency);
         selectedMode = FindPreservingTargetMode(
             displayControl->deviceName.c_str(),
             *current,
-            targetResolution);
+            targetResolution,
+            targetRefreshHz);
     }
     if (!originalControlMode) {
         const std::wstring error =
@@ -992,8 +1031,8 @@ int wmain(const int argc, wchar_t* argv[]) {
         const std::wstring error =
             L"Error: " + std::to_wstring(targetResolution.width) + L'x' +
             std::to_wstring(targetResolution.height) +
-            L" is not available at the current " +
-            std::to_wstring(current->dmDisplayFrequency) + L" Hz and " +
+            L" is not available at " +
+            std::to_wstring(targetRefreshHz) + L" Hz and " +
             std::to_wstring(current->dmBitsPerPel) +
             L"-bit desktop color depth; switching was cancelled.\n\n"
             L"The current display mode was left unchanged.";
@@ -1141,7 +1180,7 @@ int wmain(const int argc, wchar_t* argv[]) {
     const bool modePreserved =
         appliedMode &&
         HasResolution(*appliedMode, targetResolution) &&
-        appliedMode->dmDisplayFrequency == current->dmDisplayFrequency &&
+        appliedMode->dmDisplayFrequency == targetRefreshHz &&
         appliedMode->dmBitsPerPel == current->dmBitsPerPel;
 
     if (!colorPreserved || !modePreserved) {
@@ -1156,7 +1195,7 @@ int wmain(const int argc, wchar_t* argv[]) {
 
         if (!modePreserved) {
             std::wcerr
-                << L"Error: the driver did not preserve the current refresh rate "
+                << L"Error: the driver did not apply the requested refresh rate "
                    L"and desktop color depth; switching was rolled back.\n";
         } else {
             std::wcerr
@@ -1201,7 +1240,7 @@ int wmain(const int argc, wchar_t* argv[]) {
     const bool finalStatePreserved =
         finalMode &&
         HasResolution(*finalMode, targetResolution) &&
-        finalMode->dmDisplayFrequency == current->dmDisplayFrequency &&
+        finalMode->dmDisplayFrequency == targetRefreshHz &&
         finalMode->dmBitsPerPel == current->dmBitsPerPel &&
         NvidiaColorControl::ReadPrimary(finalColor, colorError, 20) &&
         NvidiaColorControl::Equivalent(finalColor, originalColor);
@@ -1215,8 +1254,9 @@ int wmain(const int argc, wchar_t* argv[]) {
             currentDpiScale->currentScaleRel,
             restoreError);
         std::wcerr
-            << L"Error: the final display state did not preserve the original "
-               L"refresh rate and NVIDIA color settings; switching was rolled back.\n";
+            << L"Error: the final display state did not retain the requested "
+               L"refresh rate and original NVIDIA color settings; switching "
+               L"was rolled back.\n";
         if (!restored) {
             std::wcerr << L"Error: " << restoreError << L".\n";
         }
