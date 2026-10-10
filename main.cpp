@@ -612,6 +612,7 @@ std::optional<DEVMODEW> FindPreservingTargetMode(
     const DEVMODEW& current,
     const Resolution targetResolution,
     const DWORD targetRefreshHz) {
+    std::optional<DEVMODEW> enumeratedMode;
     for (DWORD index = 0;; ++index) {
         DEVMODEW candidate{};
         candidate.dmSize = sizeof(candidate);
@@ -628,8 +629,12 @@ std::optional<DEVMODEW> FindPreservingTargetMode(
             continue;
         }
 
-        // EnumDisplaySettings can include modes advertised by the driver that
-        // the current connection, color depth, or display topology cannot use.
+        // Some NVIDIA/Windows configurations reject CDS_TEST even for the
+        // active mode. Prefer a tested mode, but retain an exact enumerated
+        // match for real application followed by validation and rollback.
+        if (!enumeratedMode) {
+            enumeratedMode = candidate;
+        }
         if (ChangeDisplaySettingsExW(
                 deviceName,
                 &candidate,
@@ -642,7 +647,7 @@ std::optional<DEVMODEW> FindPreservingTargetMode(
         return candidate;
     }
 
-    return std::nullopt;
+    return enumeratedMode;
 }
 
 bool RestoreOriginalDisplayState(
@@ -730,8 +735,8 @@ void WaitWhenOpenedDirectly(const bool shouldWait, const bool success) {
     std::wcin.get();
 }
 
-void ShowShortcutError(const bool openedDirectly, const std::wstring& message) {
-    if (openedDirectly) {
+void ShowShortcutError(const bool suppressDialog, const std::wstring& message) {
+    if (suppressDialog) {
         return;
     }
 
@@ -758,6 +763,8 @@ void PrintHelp() {
         << L"  100%       1720x1080 and 1920x1080.\n"
         << L"  125%       1680x1050 and 2560x1440.\n\n"
         << L"Options:\n"
+        << L"  --restore-4k  Ensure 3840x2160 at 240 Hz, without prompts.\n"
+        << L"                Already at this mode: exit successfully unchanged.\n"
         << L"  --dry-run  Show the selected mode without changing the display.\n"
         << L"  --help     Show this help text.\n";
 }
@@ -767,6 +774,7 @@ void PrintHelp() {
 int wmain(const int argc, wchar_t* argv[]) {
     const bool openedDirectly = argc == 1;
     bool dryRun = false;
+    bool restore4k = false;
     Resolution lowerResolution = kDefaultLowerResolution;
     bool hasResolutionOption = false;
 
@@ -774,6 +782,12 @@ int wmain(const int argc, wchar_t* argv[]) {
         const std::wstring_view argument{argv[index]};
         if (argument == L"--dry-run") {
             dryRun = true;
+        } else if (argument == L"--restore-4k") {
+            if (restore4k) {
+                std::wcerr << L"Error: specify --restore-4k only once.\n";
+                return 2;
+            }
+            restore4k = true;
         } else if (argument == L"--help" || argument == L"-h") {
             PrintHelp();
             return 0;
@@ -802,6 +816,13 @@ int wmain(const int argc, wchar_t* argv[]) {
         }
     }
 
+    if (restore4k && hasResolutionOption) {
+        std::wcerr
+            << L"Error: --restore-4k cannot be combined with a resolution option.\n";
+        return 2;
+    }
+    const bool suppressErrorDialog = openedDirectly || restore4k || dryRun;
+
     auto display = FindPrimaryDisplay();
     if (!display) {
         std::wcerr << L"Error: no active primary display was found.\n";
@@ -824,6 +845,13 @@ int wmain(const int argc, wchar_t* argv[]) {
         return 1;
     }
 
+    if (restore4k && HasResolution(*current, kUltraHdResolution) &&
+        current->dmDisplayFrequency == kPreferredRefreshHz) {
+        PrintMode(L"Current: ", *current);
+        std::wcout << L"Already at 3840x2160 @ 240 Hz; no changes needed.\n";
+        return 0;
+    }
+
     auto displayControl = FindDisplayControl(*display, *current);
     if (!displayControl) {
         const std::wstring error =
@@ -831,7 +859,7 @@ int wmain(const int argc, wchar_t* argv[]) {
             L"the primary display.\n\nThe current display mode was left "
             L"unchanged.";
         std::wcerr << error << L'\n';
-        ShowShortcutError(openedDirectly, error);
+        ShowShortcutError(suppressErrorDialog, error);
         WaitWhenOpenedDirectly(openedDirectly, false);
         return 1;
     }
@@ -839,7 +867,7 @@ int wmain(const int argc, wchar_t* argv[]) {
     const Resolution currentResolution{
         current->dmPelsWidth,
         current->dmPelsHeight};
-    const Resolution targetResolution = SelectTargetResolution(
+    const Resolution targetResolution = restore4k ? kUltraHdResolution : SelectTargetResolution(
         currentResolution,
         lowerResolution,
         current->dmDisplayFrequency);
@@ -872,7 +900,7 @@ int wmain(const int argc, wchar_t* argv[]) {
                 L"not be validated; switching was cancelled.\n\nThe current "
                 L"display mode was left unchanged.";
             std::wcerr << error << L'\n';
-            ShowShortcutError(openedDirectly, error);
+            ShowShortcutError(suppressErrorDialog, error);
             WaitWhenOpenedDirectly(openedDirectly, false);
             return 1;
         }
@@ -896,7 +924,7 @@ int wmain(const int argc, wchar_t* argv[]) {
                     L"before activating the RTX DisplayPort path: " +
                     topologyColorError;
                 std::wcerr << error << L'\n';
-                ShowShortcutError(openedDirectly, error);
+                ShowShortcutError(suppressErrorDialog, error);
                 WaitWhenOpenedDirectly(openedDirectly, false);
                 return 1;
             }
@@ -909,7 +937,7 @@ int wmain(const int argc, wchar_t* argv[]) {
                     L"path (error " + std::to_wstring(topologyResult) +
                     L").\n\nThe current display mode was left unchanged.";
                 std::wcerr << error << L'\n';
-                ShowShortcutError(openedDirectly, error);
+                ShowShortcutError(suppressErrorDialog, error);
                 WaitWhenOpenedDirectly(openedDirectly, false);
                 return 1;
             }
@@ -986,7 +1014,7 @@ int wmain(const int argc, wchar_t* argv[]) {
                       L"the NVIDIA color settings could not be preserved: " +
                       topologyColorError;
                 std::wcerr << error << L'\n';
-                ShowShortcutError(openedDirectly, error);
+                ShowShortcutError(suppressErrorDialog, error);
                 WaitWhenOpenedDirectly(openedDirectly, false);
                 return 1;
             }
@@ -1020,7 +1048,7 @@ int wmain(const int argc, wchar_t* argv[]) {
             L"active display path; switching was cancelled.\n\nThe current "
             L"display mode was left unchanged.";
         std::wcerr << error << L'\n';
-        ShowShortcutError(openedDirectly, error);
+        ShowShortcutError(suppressErrorDialog, error);
         WaitWhenOpenedDirectly(openedDirectly, false);
         return 1;
     }
@@ -1037,7 +1065,7 @@ int wmain(const int argc, wchar_t* argv[]) {
             L"-bit desktop color depth; switching was cancelled.\n\n"
             L"The current display mode was left unchanged.";
         std::wcerr << error << L'\n';
-        ShowShortcutError(openedDirectly, error);
+        ShowShortcutError(suppressErrorDialog, error);
         WaitWhenOpenedDirectly(openedDirectly, false);
         return 1;
     }
@@ -1127,13 +1155,10 @@ int wmain(const int argc, wchar_t* argv[]) {
         nullptr);
 
     if (testResult != DISP_CHANGE_SUCCESSFUL) {
-        const std::wstring error =
-            L"Error: " + std::wstring{DisplayChangeError(testResult)} +
-            L"\n\nThe current display mode was left unchanged.";
-        std::wcerr << error << L'\n';
-        ShowShortcutError(openedDirectly, error);
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+        std::wcerr
+            << L"Warning: legacy mode preflight failed: "
+            << DisplayChangeError(testResult)
+            << L" Trying the enumerated mode and checking the actual result.\n";
     }
 
     const LONG applyResult = ChangeDisplaySettingsExW(

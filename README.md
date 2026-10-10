@@ -25,6 +25,22 @@ The display scale is set to 150% at `3840x2160`, 100% at `1720x1080` and
 The switch is cancelled if the target 240 Hz mode is unavailable at the current
 desktop color depth, or the NVIDIA color settings cannot be preserved.
 
+Use `"Res Switcher.exe" --restore-4k` to ensure `3840x2160 @ 240 Hz` without
+prompts. If already at this mode, it exits successfully without changing
+anything. Otherwise it restores this mode with 150% scaling. Exit code 0 means
+success; nonzero means failure. Add `--dry-run` to preview only.
+
+## Restore at sign-in
+
+Double-click `scripts\Install-StartupRestore.cmd` to run `--restore-4k` once
+when the current user signs in to Windows. No administrator rights, service,
+or resident background process are required. This does not run at shutdown.
+
+Use `scripts\Set-StartupRestore.ps1 -Action Status` to check registration,
+or `scripts\Uninstall-StartupRestore.cmd` to remove the startup shortcut.
+Reinstall after moving the built EXE. The primary display must support
+`3840x2160 @ 240 Hz`; unsupported modes are not applied.
+
 If the same monitor is connected through NVIDIA DisplayPort and another GPU's
 HDMI output, Res Switcher forces the NVIDIA DisplayPort path and removes the
 other GPU's active clone before switching resolution. The HDMI cable remains
