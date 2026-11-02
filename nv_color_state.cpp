@@ -112,12 +112,12 @@ public:
 
     bool Open(std::wstring& error) {
 #if defined(_WIN64)
-        module_ = LoadLibraryW(L"nvapi64.dll");
+        module_ = LoadLibraryExW(L"nvapi64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 #else
-        module_ = LoadLibraryW(L"nvapi.dll");
+        module_ = LoadLibraryExW(L"nvapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 #endif
         if (module_ == nullptr) {
-            error = L"the NVIDIA NVAPI driver library is unavailable";
+        error = L"the NVIDIA NVAPI driver library is unavailable in the Windows system directory";
             return false;
         }
 
@@ -216,7 +216,8 @@ NvColorDataV4 MakeColorDataV4(
     const NvidiaColorState* state = nullptr) {
     auto data = MakeColorData<NvColorDataV4>(4, command, state);
     if (state != nullptr) {
-        data.data.colorSelectionPolicy = kColorSelectionPolicyUser;
+        data.data.colorSelectionPolicy = state->hasColorSelectionPolicy
+            ? state->colorSelectionPolicy : kColorSelectionPolicyUser;
     }
     return data;
 }
@@ -226,7 +227,8 @@ NvColorDataV5 MakeColorDataV5(
     const NvidiaColorState* state = nullptr) {
     auto data = MakeColorData<NvColorDataV5>(5, command, state);
     if (state != nullptr) {
-        data.data.colorSelectionPolicy = kColorSelectionPolicyUser;
+        data.data.colorSelectionPolicy = state->hasColorSelectionPolicy
+            ? state->colorSelectionPolicy : kColorSelectionPolicyUser;
         data.data.desktopDepth = state->desktopDepth;
     }
     return data;
@@ -251,7 +253,9 @@ NvidiaColorState ToState(const NvColorDataV4& data) {
         data.data.bpc,
         0,
         4,
-        false};
+        false,
+        data.data.colorSelectionPolicy,
+        true};
 }
 
 NvidiaColorState ToState(const NvColorDataV5& data) {
@@ -262,6 +266,8 @@ NvidiaColorState ToState(const NvColorDataV5& data) {
         data.data.bpc,
         data.data.desktopDepth,
         5,
+        true,
+        data.data.colorSelectionPolicy,
         true};
 }
 
@@ -317,6 +323,7 @@ bool RunWithRetry(
     Action action,
     std::wstring& error) {
     NvApiSession session;
+    error.clear();
     if (!session.Open(error)) {
         return false;
     }
@@ -463,8 +470,10 @@ bool NvidiaColorControl::Equivalent(
            left.colorimetry == right.colorimetry &&
            left.dynamicRange == right.dynamicRange &&
            left.bpc == right.bpc &&
-           (!left.hasDesktopDepth || !right.hasDesktopDepth ||
-            left.desktopDepth == right.desktopDepth);
+           left.hasDesktopDepth == right.hasDesktopDepth &&
+           (!left.hasDesktopDepth || left.desktopDepth == right.desktopDepth) &&
+           left.hasColorSelectionPolicy == right.hasColorSelectionPolicy &&
+           (!left.hasColorSelectionPolicy || left.colorSelectionPolicy == right.colorSelectionPolicy);
 }
 
 std::wstring NvidiaColorControl::Describe(const NvidiaColorState& state) {

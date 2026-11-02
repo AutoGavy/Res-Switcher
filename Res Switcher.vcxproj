@@ -74,6 +74,13 @@
 
   <PropertyGroup Label="UserMacros" />
 
+  <ItemDefinitionGroup>
+    <Link>
+      <AdditionalDependencies>PowrProf.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>/DEPENDENTLOADFLAG:0x800 %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -150,7 +157,12 @@
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="nv_color_state.cpp" />
+    <ClCompile Include="power_plan.cpp" />
+    <ClCompile Include="display_config.cpp" />
     <ClInclude Include="nv_color_state.h" />
+    <ClInclude Include="power_plan.h" />
+    <ClInclude Include="display_config.h" />
+    <ClInclude Include="switch_safety.h" />
     <ResourceCompile Include="res.rc" />
     <Image Include="res.ico" />
     <None Include="third_party\NVAPI-LICENSE.txt" />

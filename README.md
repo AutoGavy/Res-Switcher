@@ -19,6 +19,17 @@ targets `3840x2160 @ 240 Hz`, even when already at 3840x2160. At 240 Hz, the
 selected lower resolution and 3840x2160 toggle normally. `--dry-run` never
 changes the display, and `--help` only prints usage.
 
+After a successful switch, `3840x2160` uses **Balanced**; all lower resolutions
+use **Ultimate Performance**, including the default `1720x1080` mode. Both
+plans must already exist in Windows (English and Simplified Chinese names are
+recognized). A missing target plan cancels the switch. `--dry-run` never
+changes the power plan.
+
+Only one switch can run at a time. On a switching or power-activation failure,
+the program attempts to restore the original display topology, mode, colors
+and scaling, and reports any recovery it cannot verify. Duplicate matching
+power-plan names must be resolved in Windows before switching.
+
 The display scale is set to 150% at `3840x2160`, 100% at `1720x1080` and
 `1920x1080`, and 125% at `1680x1050` and `2560x1440`.
 
@@ -26,8 +37,9 @@ The switch is cancelled if the target 240 Hz mode is unavailable at the current
 desktop color depth, or the NVIDIA color settings cannot be preserved.
 
 Use `"Res Switcher.exe" --restore-4k` to ensure `3840x2160 @ 240 Hz` without
-prompts. If already at this mode, it exits successfully without changing
-anything. Otherwise it restores this mode with 150% scaling. Exit code 0 means
+prompts. If already at this mode, it leaves the display unchanged and ensures
+Balanced is active. Otherwise it restores this mode with 150% scaling and
+activates Balanced. An already active plan is not reapplied. Exit code 0 means
 success; nonzero means failure. Add `--dry-run` to preview only.
 
 ## Restore at sign-in
@@ -45,3 +57,4 @@ If the same monitor is connected through NVIDIA DisplayPort and another GPU's
 HDMI output, Res Switcher forces the NVIDIA DisplayPort path and removes the
 other GPU's active clone before switching resolution. The HDMI cable remains
 connected and can still be re-enabled manually as a backup display path.
+Other independent displays are retained.

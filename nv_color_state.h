@@ -11,6 +11,8 @@ struct NvidiaColorState {
     std::int32_t desktopDepth = 0;
     std::uint32_t apiVersion = 0;
     bool hasDesktopDepth = false;
+    std::int32_t colorSelectionPolicy = 0;
+    bool hasColorSelectionPolicy = false;
 };
 
 class NvidiaColorControl {

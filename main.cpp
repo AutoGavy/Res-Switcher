@@ -1,11 +1,16 @@
 #include <windows.h>
 
 #include "nv_color_state.h"
+#include "power_plan.h"
+#include "display_config.h"
+#include "switch_safety.h"
 
 #include <iostream>
+#include <exception>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -41,16 +46,21 @@ struct DisplayControl {
     DisplaySource source;
 };
 
-struct SuppliedDisplayConfig {
-    DISPLAYCONFIG_PATH_INFO path;
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-};
+using SuppliedDisplayConfig = DisplayConfiguration;
 
 struct DpiScaleInfo {
     LONG minScaleRel;
     LONG currentScaleRel;
     LONG maxScaleRel;
 };
+
+bool ValidDpiScale(const DpiScaleInfo& scale) {
+    const auto count = static_cast<LONG>(std::size(kDpiScaleValues));
+    return scale.minScaleRel <= 0 && scale.minScaleRel > -count &&
+        scale.maxScaleRel >= 0 && scale.maxScaleRel < count + scale.minScaleRel &&
+        scale.currentScaleRel >= scale.minScaleRel &&
+        scale.currentScaleRel <= scale.maxScaleRel;
+}
 
 struct DpiScaleGet {
     DISPLAYCONFIG_DEVICE_INFO_HEADER header;
@@ -197,26 +207,11 @@ bool ContainsDevicePath(
 std::optional<DisplayControl> FindDisplayControl(
     const DISPLAY_DEVICEW& primaryDisplay,
     const DEVMODEW& currentMode) {
-    UINT32 pathCount = 0;
-    UINT32 modeCount = 0;
-    if (GetDisplayConfigBufferSizes(
-            QDC_ONLY_ACTIVE_PATHS,
-            &pathCount,
-            &modeCount) != ERROR_SUCCESS) {
+    const auto configuration = ReadDisplayConfiguration(QDC_ONLY_ACTIVE_PATHS);
+    if (!configuration) {
         return std::nullopt;
     }
-
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
-    if (QueryDisplayConfig(
-            QDC_ONLY_ACTIVE_PATHS,
-            &pathCount,
-            paths.data(),
-            &modeCount,
-            modes.data(),
-            nullptr) != ERROR_SUCCESS) {
-        return std::nullopt;
-    }
+    const auto& paths = configuration->paths;
 
     const auto monitorPaths = FindAttachedMonitorPaths(
         primaryDisplay.DeviceName);
@@ -224,7 +219,7 @@ std::optional<DisplayControl> FindDisplayControl(
     bool selectedRefreshMatches = false;
     bool selectedNameMatches = false;
 
-    for (UINT32 index = 0; index < pathCount; ++index) {
+    for (std::size_t index = 0; index < paths.size(); ++index) {
         DISPLAYCONFIG_TARGET_DEVICE_NAME targetName{};
         targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
         targetName.header.size = sizeof(targetName);
@@ -295,28 +290,13 @@ std::optional<DisplayControl> FindDisplayControl(
 
 std::optional<DisplaySource> FindDatabaseDisplaySource(
     const wchar_t* deviceName) {
-    UINT32 pathCount = 0;
-    UINT32 modeCount = 0;
-    if (GetDisplayConfigBufferSizes(
-            QDC_ALL_PATHS,
-            &pathCount,
-            &modeCount) != ERROR_SUCCESS) {
+    const auto configuration = ReadDisplayConfiguration(QDC_ALL_PATHS);
+    if (!configuration) {
         return std::nullopt;
     }
+    const auto& paths = configuration->paths;
 
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
-    if (QueryDisplayConfig(
-            QDC_ALL_PATHS,
-            &pathCount,
-            paths.data(),
-            &modeCount,
-            modes.data(),
-            nullptr) != ERROR_SUCCESS) {
-        return std::nullopt;
-    }
-
-    for (UINT32 index = 0; index < pathCount; ++index) {
+    for (std::size_t index = 0; index < paths.size(); ++index) {
         DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName{};
         sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
         sourceName.header.size = sizeof(sourceName);
@@ -340,7 +320,8 @@ std::optional<SuppliedDisplayConfig>
 BuildForcedNvidiaDisplayPortConfiguration(
     const DISPLAY_DEVICEW& primaryDisplay,
     const DEVMODEW& currentMode,
-    const Resolution sourceResolution) {
+    const Resolution sourceResolution,
+    const DisplayControl& currentControl) {
     if (std::wstring_view{primaryDisplay.DeviceString}.find(L"NVIDIA") ==
         std::wstring_view::npos) {
         return std::nullopt;
@@ -352,32 +333,19 @@ BuildForcedNvidiaDisplayPortConfiguration(
         return std::nullopt;
     }
 
-    UINT32 pathCount = 0;
-    UINT32 modeCount = 0;
-    if (GetDisplayConfigBufferSizes(
-            QDC_ALL_PATHS,
-            &pathCount,
-            &modeCount) != ERROR_SUCCESS) {
+    const auto all = ReadDisplayConfiguration(QDC_ALL_PATHS);
+    if (!all) {
         return std::nullopt;
     }
-
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
-    if (QueryDisplayConfig(
-            QDC_ALL_PATHS,
-            &pathCount,
-            paths.data(),
-            &modeCount,
-            modes.data(),
-            nullptr) != ERROR_SUCCESS) {
-        return std::nullopt;
-    }
+    const auto& paths = all->paths;
+    const auto& modes = all->modes;
 
     const auto monitorPaths = FindAttachedMonitorPaths(
         primaryDisplay.DeviceName);
     std::wstring displayPortMonitorPath;
     std::optional<DISPLAYCONFIG_TARGET_MODE> activeTargetMode;
-    for (UINT32 index = 0; index < pathCount; ++index) {
+    DISPLAYCONFIG_ROTATION activeRotation = DISPLAYCONFIG_ROTATION_IDENTITY;
+    for (std::size_t index = 0; index < paths.size(); ++index) {
         const auto& path = paths[index];
         if ((path.flags & DISPLAYCONFIG_PATH_ACTIVE) == 0 ||
             path.targetInfo.outputTechnology !=
@@ -385,8 +353,9 @@ BuildForcedNvidiaDisplayPortConfiguration(
             !RefreshRateMatches(
                 path.targetInfo.refreshRate,
                 currentMode.dmDisplayFrequency) ||
-            path.targetInfo.modeInfoIdx ==
-                DISPLAYCONFIG_PATH_MODE_IDX_INVALID) {
+            !ValidDisplayModeIndex(*all, path.targetInfo.modeInfoIdx,
+                DISPLAYCONFIG_MODE_INFO_TYPE_TARGET,
+                path.targetInfo.adapterId, path.targetInfo.id)) {
             continue;
         }
 
@@ -404,6 +373,7 @@ BuildForcedNvidiaDisplayPortConfiguration(
 
         displayPortMonitorPath = targetName.monitorDevicePath;
         activeTargetMode = modes[path.targetInfo.modeInfoIdx].targetMode;
+        activeRotation = path.targetInfo.rotation;
         break;
     }
 
@@ -411,7 +381,7 @@ BuildForcedNvidiaDisplayPortConfiguration(
         return std::nullopt;
     }
 
-    for (UINT32 index = 0; index < pathCount; ++index) {
+    for (std::size_t index = 0; index < paths.size(); ++index) {
         auto path = paths[index];
         if (!SameAdapter(
                 path.targetInfo.adapterId,
@@ -454,6 +424,7 @@ BuildForcedNvidiaDisplayPortConfiguration(
             activeTargetMode->targetVideoSignalInfo.vSyncFreq;
         path.targetInfo.scanLineOrdering =
             activeTargetMode->targetVideoSignalInfo.scanLineOrdering;
+        path.targetInfo.rotation = activeRotation;
         if (sourceResolution.width !=
                 activeTargetMode->targetVideoSignalInfo.activeSize.cx ||
             sourceResolution.height !=
@@ -463,14 +434,17 @@ BuildForcedNvidiaDisplayPortConfiguration(
         }
         path.flags = DISPLAYCONFIG_PATH_ACTIVE;
 
-        SuppliedDisplayConfig configuration{
-            path,
-            std::vector<DISPLAYCONFIG_MODE_INFO>{sourceMode, targetMode}};
-        auto validatePath = configuration.path;
-        auto validateModes = configuration.modes;
+        auto configuration = ReplacePrimaryDisplayPaths(*all,
+            currentControl.source.adapterId, currentControl.source.sourceId,
+            path, sourceMode, targetMode);
+        if (!configuration) {
+            continue;
+        }
+        auto validatePaths = configuration->paths;
+        auto validateModes = configuration->modes;
         const LONG validateResult = SetDisplayConfig(
-            1,
-            &validatePath,
+            static_cast<UINT32>(validatePaths.size()),
+            validatePaths.data(),
             static_cast<UINT32>(validateModes.size()),
             validateModes.data(),
             SDC_VALIDATE |
@@ -486,28 +460,9 @@ BuildForcedNvidiaDisplayPortConfiguration(
 
 LONG ApplySuppliedDisplayConfig(
     const SuppliedDisplayConfig& configuration) {
-    auto path = configuration.path;
-    auto modes = configuration.modes;
-    LONG result = SetDisplayConfig(
-        1,
-        &path,
-        static_cast<UINT32>(modes.size()),
-        modes.data(),
-        SDC_APPLY |
-            SDC_USE_SUPPLIED_DISPLAY_CONFIG |
-            SDC_ALLOW_CHANGES |
-            SDC_SAVE_TO_DATABASE);
+    LONG result = ApplyDisplayConfiguration(configuration, true, true);
     if (result == ERROR_INVALID_PARAMETER) {
-        path = configuration.path;
-        modes = configuration.modes;
-        result = SetDisplayConfig(
-            1,
-            &path,
-            static_cast<UINT32>(modes.size()),
-            modes.data(),
-            SDC_APPLY |
-                SDC_USE_SUPPLIED_DISPLAY_CONFIG |
-                SDC_ALLOW_CHANGES);
+        result = ApplyDisplayConfiguration(configuration, false, true);
     }
     return result;
 }
@@ -523,15 +478,21 @@ std::optional<DpiScaleInfo> ReadDpiScale(const DisplaySource& source) {
         return std::nullopt;
     }
 
-    return DpiScaleInfo{
+    const DpiScaleInfo scale{
         request.minScaleRel,
         request.currentScaleRel,
         request.maxScaleRel};
+    // Validate before negating/indexing driver-provided signed values.
+    if (!ValidDpiScale(scale)) {
+        return std::nullopt;
+    }
+    return scale;
 }
 
 std::optional<LONG> RelativeDpiScaleForPercent(
     const DpiScaleInfo& scale,
     const DWORD targetPercent) {
+    if (!ValidDpiScale(scale)) { return std::nullopt; }
     int targetIndex = -1;
     for (int index = 0; index < static_cast<int>(std::size(kDpiScaleValues)); ++index) {
         if (kDpiScaleValues[index] == targetPercent) {
@@ -546,20 +507,21 @@ std::optional<LONG> RelativeDpiScaleForPercent(
 
     // The DisplayConfig API stores the selected scale relative to Windows'
     // recommended scale for this source, not as an absolute percentage.
-    const int recommendedIndex = -scale.minScaleRel;
-    const LONG relativeScale = targetIndex - recommendedIndex;
+    const auto relativeScale = static_cast<long long>(targetIndex) + scale.minScaleRel;
     if (relativeScale < scale.minScaleRel ||
         relativeScale > scale.maxScaleRel) {
         return std::nullopt;
     }
 
-    return relativeScale;
+    return static_cast<LONG>(relativeScale);
 }
 
 std::optional<DWORD> DpiPercentForRelativeScale(
     const DpiScaleInfo& scale,
     const LONG relativeScale) {
-    const int index = -scale.minScaleRel + relativeScale;
+    if (!ValidDpiScale(scale) || relativeScale < scale.minScaleRel ||
+        relativeScale > scale.maxScaleRel) { return std::nullopt; }
+    const auto index = -static_cast<long long>(scale.minScaleRel) + relativeScale;
     if (index < 0 || index >= static_cast<int>(std::size(kDpiScaleValues))) {
         return std::nullopt;
     }
@@ -577,15 +539,8 @@ bool SetDpiScale(const DisplaySource& source, const LONG relativeScale) {
 }
 
 bool NotifySettingsChange() {
-    DWORD_PTR result = 0;
-    return SendMessageTimeoutW(
-               HWND_BROADCAST,
-               WM_SETTINGCHANGE,
-               0,
-               0,
-               SMTO_ABORTIFHUNG | SMTO_BLOCK,
-               2000,
-               &result) != 0;
+    // No pointer payload, so this can be queued without waiting on hung apps.
+    return SendNotifyMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 0) != 0;
 }
 
 constexpr DWORD TargetDpiPercent(const Resolution resolution) {
@@ -624,6 +579,7 @@ std::optional<DEVMODEW> FindPreservingTargetMode(
         if (!HasResolution(candidate, targetResolution) ||
             candidate.dmDisplayFrequency != targetRefreshHz ||
             candidate.dmBitsPerPel != current.dmBitsPerPel ||
+            candidate.dmDisplayOrientation != current.dmDisplayOrientation ||
             (candidate.dmDisplayFlags & DM_INTERLACED) !=
                 (current.dmDisplayFlags & DM_INTERLACED)) {
             continue;
@@ -650,46 +606,128 @@ std::optional<DEVMODEW> FindPreservingTargetMode(
     return enumeratedMode;
 }
 
-bool RestoreOriginalDisplayState(
-    const wchar_t* deviceName,
-    const DEVMODEW& originalMode,
-    const NvidiaColorState& originalColor,
-    const DisplaySource& displaySource,
-    const LONG originalDpiScale,
-    std::wstring& error) {
-    DEVMODEW restoreMode = originalMode;
-    const LONG restoreResult = ChangeDisplaySettingsExW(
-        deviceName,
-        &restoreMode,
-        nullptr,
-        CDS_UPDATEREGISTRY,
-        nullptr);
-    if (restoreResult != DISP_CHANGE_SUCCESSFUL) {
-        error = L"the original display mode could not be restored";
-        return false;
-    }
+bool SameCoreMode(const DEVMODEW& actual, const DEVMODEW& expected) {
+    return actual.dmPelsWidth == expected.dmPelsWidth &&
+        actual.dmPelsHeight == expected.dmPelsHeight &&
+        actual.dmDisplayFrequency == expected.dmDisplayFrequency &&
+        actual.dmBitsPerPel == expected.dmBitsPerPel &&
+        actual.dmDisplayOrientation == expected.dmDisplayOrientation &&
+        (actual.dmDisplayFlags & DM_INTERLACED) == (expected.dmDisplayFlags & DM_INTERLACED);
+}
 
-    NvidiaColorState restoredColor;
-    std::wstring colorError;
-    const bool colorAlreadyRestored =
-        NvidiaColorControl::ReadPrimary(restoredColor, colorError, 20) &&
-        NvidiaColorControl::Equivalent(restoredColor, originalColor);
-    if (!colorAlreadyRestored &&
-        (!NvidiaColorControl::ApplyToPrimary(originalColor, colorError, 20) ||
-         !NvidiaColorControl::ReadPrimary(restoredColor, colorError, 20) ||
-         !NvidiaColorControl::Equivalent(restoredColor, originalColor))) {
-        error = L"the original resolution was restored, but its NVIDIA color "
-                L"settings could not be restored: " + colorError;
-        return false;
+bool SetDpiPercentAndVerify(const DisplaySource& source, const DWORD percent) {
+    auto scale = ReadDpiScale(source);
+    const auto relative = scale ? RelativeDpiScaleForPercent(*scale, percent) : std::nullopt;
+    if (!relative) { return false; }
+    if (scale->currentScaleRel != *relative && !SetDpiScale(source, *relative)) { return false; }
+    for (unsigned int attempt = 0; attempt < 10; ++attempt) {
+        if (attempt != 0) { Sleep(50); }
+        scale = ReadDpiScale(source);
+        if (scale && DpiPercentForRelativeScale(*scale, scale->currentScaleRel) == percent) {
+            return true;
+        }
     }
+    return false;
+}
 
-    if (!SetDpiScale(displaySource, originalDpiScale)) {
-        error = L"the original display mode and NVIDIA color settings were "
-                L"restored, but the original DPI scaling could not be restored";
-        return false;
+struct DisplaySnapshot {
+    DisplayConfiguration active;
+    DisplayConfiguration saved;
+    DisplayConfiguration protectedViews;
+    DEVMODEW primaryMode{};
+    NvidiaColorState color;
+    DisplaySource dpiSource{};
+    DWORD dpiPercent = 0;
+};
+
+std::optional<DisplaySnapshot> CaptureDisplaySnapshot(
+    const DisplayControl& control, const DEVMODEW& mode,
+    const NvidiaColorState& color) {
+    const auto active = ReadDisplayConfiguration(QDC_ONLY_ACTIVE_PATHS);
+    const auto saved = ReadDisplayConfiguration(QDC_DATABASE_CURRENT);
+    const auto dpi = ReadDpiScale(control.source);
+    const auto percent = dpi ? DpiPercentForRelativeScale(*dpi, dpi->currentScaleRel) : std::nullopt;
+    const auto primary = FindPrimaryDisplay();
+    const auto observedMode = primary ? ReadCurrentMode(primary->DeviceName) : std::nullopt;
+    const auto observedControl = primary && observedMode
+        ? FindDisplayControl(*primary, *observedMode) : std::nullopt;
+    if (!active || !saved || !percent || !RestorableDisplayConfiguration(*active) ||
+        !RestorableDisplayConfiguration(*saved) || !observedMode ||
+        !SameCoreMode(*observedMode, mode) || !observedControl ||
+        !SameDisplaySource(observedControl->source, control.source)) { return std::nullopt; }
+    auto protectedViews = *active;
+    std::erase_if(protectedViews.paths, [&](const auto& path) {
+        return SameAdapter(path.sourceInfo.adapterId, control.source.adapterId) &&
+            path.sourceInfo.id == control.source.sourceId;
+    });
+    return DisplaySnapshot{*active, *saved, std::move(protectedViews), mode, color, control.source, *percent};
+}
+
+bool RestoreDisplaySnapshot(const DisplaySnapshot& snapshot, std::wstring& error) {
+    error.clear();
+    // An API can reject a change without touching anything. In that case do
+    // not force an unnecessary full display reset (and another black flash).
+    const auto before = ReadDisplayConfiguration(QDC_ONLY_ACTIVE_PATHS);
+    const auto beforeSaved = ReadDisplayConfiguration(QDC_DATABASE_CURRENT);
+    const auto beforePrimary = FindPrimaryDisplay();
+    const auto beforeMode = beforePrimary ? ReadCurrentMode(beforePrimary->DeviceName) : std::nullopt;
+    const auto beforeDpi = ReadDpiScale(snapshot.dpiSource);
+    if (before && beforeSaved && beforeMode && beforeDpi &&
+        SameCoreMode(*beforeMode, snapshot.primaryMode) &&
+        EquivalentDisplayConfigurations(snapshot.active, *before) &&
+        EquivalentDisplayConfigurations(snapshot.saved, *beforeSaved) &&
+        DpiPercentForRelativeScale(*beforeDpi, beforeDpi->currentScaleRel) == snapshot.dpiPercent) {
+        NvidiaColorState color;
+        std::wstring colorError;
+        if (NvidiaColorControl::ReadPrimary(color, colorError, 20) &&
+            NvidiaColorControl::Equivalent(color, snapshot.color)) { return true; }
     }
-
-    return true;
+    const auto append = [&](const std::wstring& detail) {
+        if (!error.empty()) { error += L"; "; }
+        error += detail;
+    };
+    // Restore the persisted configuration separately if it differed from the
+    // active (temporary) one at launch. Otherwise one apply is sufficient.
+    if (!EquivalentDisplayConfigurations(snapshot.saved, snapshot.active) &&
+        ApplyDisplayConfiguration(snapshot.saved, true, false) != ERROR_SUCCESS) {
+        append(L"the saved display configuration could not be restored");
+    }
+    const bool sameSaved = EquivalentDisplayConfigurations(snapshot.saved, snapshot.active);
+    const LONG result = ApplyDisplayConfiguration(snapshot.active, sameSaved, false);
+    if (result != ERROR_SUCCESS) {
+        append(L"the original display topology could not be restored (Windows error " +
+            std::to_wstring(result) + L")");
+    }
+    const auto actual = ReadDisplayConfiguration(QDC_ONLY_ACTIVE_PATHS);
+    const auto primary = FindPrimaryDisplay();
+    const auto mode = primary ? ReadCurrentMode(primary->DeviceName) : std::nullopt;
+    const bool topologyRestored = actual &&
+        EquivalentDisplayConfigurations(snapshot.active, *actual) && mode &&
+        SameCoreMode(*mode, snapshot.primaryMode);
+    if (!topologyRestored) {
+        append(L"the original topology/mode could not be verified");
+    } else {
+        NvidiaColorState color;
+        std::wstring colorError;
+        const bool already = NvidiaColorControl::ReadPrimary(color, colorError, 20) &&
+            NvidiaColorControl::Equivalent(color, snapshot.color);
+        if (!already && (!NvidiaColorControl::ApplyToPrimary(snapshot.color, colorError, 20) ||
+                !NvidiaColorControl::ReadPrimary(color, colorError, 20) ||
+                !NvidiaColorControl::Equivalent(color, snapshot.color))) {
+            append(L"the original NVIDIA colors could not be restored: " + colorError);
+        }
+    }
+    // Attempt DPI recovery even if the color driver failed. Use an absolute
+    // percentage because the recommended baseline may have changed.
+    if (!SetDpiPercentAndVerify(snapshot.dpiSource, snapshot.dpiPercent)) {
+        append(L"the original DPI scaling could not be restored");
+    }
+    const auto saved = ReadDisplayConfiguration(QDC_DATABASE_CURRENT);
+    if (!saved || !EquivalentDisplayConfigurations(snapshot.saved, *saved)) {
+        append(L"the persisted display configuration could not be verified");
+    }
+    NotifySettingsChange();
+    return error.empty();
 }
 
 const wchar_t* DisplayChangeError(const LONG result) {
@@ -762,16 +800,20 @@ void PrintHelp() {
         << L"  150%       3840x2160.\n"
         << L"  100%       1720x1080 and 1920x1080.\n"
         << L"  125%       1680x1050 and 2560x1440.\n\n"
+        << L"Power plans (selected from the actual target resolution):\n"
+        << L"  Balanced              3840x2160.\n"
+        << L"  Ultimate Performance  Lower resolutions.\n\n"
         << L"Options:\n"
         << L"  --restore-4k  Ensure 3840x2160 at 240 Hz, without prompts.\n"
-        << L"                Already at this mode: exit successfully unchanged.\n"
-        << L"  --dry-run  Show the selected mode without changing the display.\n"
+        << L"                Already at this mode: leave the display unchanged\n"
+        << L"                and ensure the Balanced power plan is active.\n"
+        << L"  --dry-run  Preview only; do not change the display or power plan.\n"
         << L"  --help     Show this help text.\n";
 }
 
 } // namespace
 
-int wmain(const int argc, wchar_t* argv[]) {
+int RunProgram(const int argc, wchar_t* argv[]) {
     const bool openedDirectly = argc == 1;
     bool dryRun = false;
     bool restore4k = false;
@@ -823,32 +865,78 @@ int wmain(const int argc, wchar_t* argv[]) {
     }
     const bool suppressErrorDialog = openedDirectly || restore4k || dryRun;
 
-    auto display = FindPrimaryDisplay();
-    if (!display) {
-        std::wcerr << L"Error: no active primary display was found.\n";
+    SwitchLock switchLock;
+    if (!switchLock.Acquired()) {
+        std::wcerr << L"Error: another display switch is in progress, or the switch lock is unavailable.\n";
+        return 1;
+    }
+    std::optional<DisplaySnapshot> snapshot;
+    std::wstring recoveryMessage;
+    RollbackAction rollback([&] {
+        std::wstring recoveryError;
+        if (snapshot && RestoreDisplaySnapshot(*snapshot, recoveryError)) {
+            recoveryMessage = L"Original display topology, mode, colors and scaling verified (unchanged or restored).";
+        } else {
+            recoveryMessage = L"Warning: display rollback was not fully confirmed: " + recoveryError;
+        }
+        std::wcerr << recoveryMessage << L'\n';
+    });
+    const auto fail = [&](const std::wstring& error) {
+        // Restore before opening a dialog or waiting for Enter on a bad mode.
+        std::wcerr << error << L'\n';
+        rollback.Run();
+        switchLock.Release();
+        ShowShortcutError(suppressErrorDialog,
+            recoveryMessage.empty() ? error : error + L"\n\n" + recoveryMessage);
         WaitWhenOpenedDirectly(openedDirectly, false);
         return 1;
+    };
+    const auto prepareRollback = [&](const DisplayControl& control,
+        const DEVMODEW& mode, const NvidiaColorState& color) {
+        if (!snapshot) { snapshot = CaptureDisplaySnapshot(control, mode, color); }
+        return snapshot.has_value();
+    };
+
+    auto display = FindPrimaryDisplay();
+    if (!display) {
+        return fail(L"Error: no active primary display was found.");
     }
 
     auto current = ReadCurrentMode(display->DeviceName);
     if (!current) {
-        std::wcerr << L"Error: Windows could not read the current display mode.\n";
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+        return fail(L"Error: Windows could not read the current display mode.");
     }
 
     if (current->dmDisplayFrequency <= 1 || current->dmBitsPerPel == 0) {
-        std::wcerr
-            << L"Error: Windows did not report an explicit current refresh rate "
-               L"and desktop color depth; switching was cancelled.\n";
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+        return fail(L"Error: Windows did not report an explicit refresh rate and color depth; switching was cancelled.");
+    }
+
+    const Resolution currentResolution{current->dmPelsWidth, current->dmPelsHeight};
+    const Resolution targetResolution = restore4k ? kUltraHdResolution : SelectTargetResolution(
+        currentResolution, lowerResolution, current->dmDisplayFrequency);
+    const DWORD targetRefreshHz = kPreferredRefreshHz;
+
+    std::wstring powerError;
+    const auto targetPowerPlan = FindPowerPlan(
+        WindowsPowerPlans(),
+        PowerPlanForResolution(targetResolution.width, targetResolution.height),
+        powerError);
+    if (!targetPowerPlan) {
+        const std::wstring error = L"Error: " + powerError +
+            L"\nThe display and power plan were left unchanged.";
+        return fail(error);
     }
 
     if (restore4k && HasResolution(*current, kUltraHdResolution) &&
         current->dmDisplayFrequency == kPreferredRefreshHz) {
         PrintMode(L"Current: ", *current);
-        std::wcout << L"Already at 3840x2160 @ 240 Hz; no changes needed.\n";
+        std::wcout << L"Already at 3840x2160 @ 240 Hz; no display changes needed.\n";
+        if (!dryRun && !ActivatePowerPlan(WindowsPowerPlans(), *targetPowerPlan, powerError)) {
+            std::wcerr << L"Error: " << powerError << L'\n';
+            return 1;
+        }
+        std::wcout << (dryRun ? L"Would use power plan: " : L"Power plan: ")
+            << DescribePowerPlan(*targetPowerPlan) << L'\n';
         return 0;
     }
 
@@ -858,20 +946,9 @@ int wmain(const int argc, wchar_t* argv[]) {
             L"Error: Windows could not identify the active display path for "
             L"the primary display.\n\nThe current display mode was left "
             L"unchanged.";
-        std::wcerr << error << L'\n';
-        ShowShortcutError(suppressErrorDialog, error);
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+        return fail(error);
     }
 
-    const Resolution currentResolution{
-        current->dmPelsWidth,
-        current->dmPelsHeight};
-    const Resolution targetResolution = restore4k ? kUltraHdResolution : SelectTargetResolution(
-        currentResolution,
-        lowerResolution,
-        current->dmDisplayFrequency);
-    const DWORD targetRefreshHz = kPreferredRefreshHz;
     bool wouldForceNvidiaDisplayPort = false;
     const auto primaryDatabaseSource = FindDatabaseDisplaySource(
         display->DeviceName);
@@ -888,21 +965,20 @@ int wmain(const int argc, wchar_t* argv[]) {
             BuildForcedNvidiaDisplayPortConfiguration(
                 *display,
                 *current,
-                currentResolution);
+                currentResolution,
+                *displayControl);
         const auto targetNvidiaConfiguration =
             BuildForcedNvidiaDisplayPortConfiguration(
                 *display,
                 *current,
-                targetResolution);
+                targetResolution,
+                *displayControl);
         if (!currentNvidiaConfiguration || !targetNvidiaConfiguration) {
             const std::wstring error =
                 L"Error: the RTX display's physical DisplayPort path could "
                 L"not be validated; switching was cancelled.\n\nThe current "
                 L"display mode was left unchanged.";
-            std::wcerr << error << L'\n';
-            ShowShortcutError(suppressErrorDialog, error);
-            WaitWhenOpenedDirectly(openedDirectly, false);
-            return 1;
+            return fail(error);
         }
 
         if (dryRun) {
@@ -923,23 +999,26 @@ int wmain(const int argc, wchar_t* argv[]) {
                     L"Error: NVIDIA color settings could not be protected "
                     L"before activating the RTX DisplayPort path: " +
                     topologyColorError;
-                std::wcerr << error << L'\n';
-                ShowShortcutError(suppressErrorDialog, error);
-                WaitWhenOpenedDirectly(openedDirectly, false);
-                return 1;
+                return fail(error);
             }
 
+            if (!prepareRollback(*displayControl, *current, topologyColor)) {
+                return fail(L"Error: the original display state could not be saved; no changes made.");
+            }
+            const auto& primaryTarget = currentNvidiaConfiguration->paths.front().targetInfo;
+            std::erase_if(snapshot->protectedViews.paths, [&](const auto& path) {
+                return SameAdapter(path.targetInfo.adapterId, primaryTarget.adapterId) &&
+                    path.targetInfo.id == primaryTarget.id;
+            });
+            rollback.Arm();
             const LONG topologyResult = ApplySuppliedDisplayConfig(
                 *currentNvidiaConfiguration);
             if (topologyResult != ERROR_SUCCESS) {
                 const std::wstring error =
                     L"Error: Windows could not activate the RTX DisplayPort "
                     L"path (error " + std::to_wstring(topologyResult) +
-                    L").\n\nThe current display mode was left unchanged.";
-                std::wcerr << error << L'\n';
-                ShowShortcutError(suppressErrorDialog, error);
-                WaitWhenOpenedDirectly(openedDirectly, false);
-                return 1;
+                    L").";
+                return fail(error);
             }
 
             bool normalized = false;
@@ -964,10 +1043,7 @@ int wmain(const int argc, wchar_t* argv[]) {
                     !SameAdapter(
                         nextControl->source.adapterId,
                         nextDatabaseSource->adapterId) ||
-                    !HasResolution(*nextCurrent, currentResolution) ||
-                    nextCurrent->dmDisplayFrequency !=
-                        current->dmDisplayFrequency ||
-                    nextCurrent->dmBitsPerPel != current->dmBitsPerPel) {
+                    !SameCoreMode(*nextCurrent, *current)) {
                     continue;
                 }
 
@@ -978,6 +1054,14 @@ int wmain(const int argc, wchar_t* argv[]) {
                 break;
             }
 
+            if (!normalized) {
+                return fail(L"Error: Windows did not activate the RTX DisplayPort path as the primary display.");
+            }
+            const auto normalizedConfiguration = ReadDisplayConfiguration(QDC_ONLY_ACTIVE_PATHS);
+            if (!normalizedConfiguration ||
+                !ContainsDisplayViews(snapshot->protectedViews, *normalizedConfiguration)) {
+                return fail(L"Error: normalizing the primary path changed an independent display.");
+            }
             NvidiaColorState normalizedColor;
             bool colorPreserved =
                 NvidiaColorControl::ReadPrimary(
@@ -1006,17 +1090,11 @@ int wmain(const int argc, wchar_t* argv[]) {
                 colorPreserved = true;
             }
 
-            if (!normalized || !colorPreserved) {
-                const std::wstring error = !normalized
-                    ? L"Error: Windows did not activate the RTX DisplayPort "
-                      L"path as the primary display."
-                    : L"Error: the RTX DisplayPort path was activated, but "
+            if (!colorPreserved) {
+                const std::wstring error = L"Error: the RTX DisplayPort path was activated, but "
                       L"the NVIDIA color settings could not be preserved: " +
                       topologyColorError;
-                std::wcerr << error << L'\n';
-                ShowShortcutError(suppressErrorDialog, error);
-                WaitWhenOpenedDirectly(openedDirectly, false);
-                return 1;
+                return fail(error);
             }
         }
     }
@@ -1045,12 +1123,8 @@ int wmain(const int argc, wchar_t* argv[]) {
     if (!originalControlMode) {
         const std::wstring error =
             L"Error: the current display mode could not be validated on the "
-            L"active display path; switching was cancelled.\n\nThe current "
-            L"display mode was left unchanged.";
-        std::wcerr << error << L'\n';
-        ShowShortcutError(suppressErrorDialog, error);
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+            L"active display path; switching was cancelled.";
+        return fail(error);
     }
 
     PrintMode(L"Current: ", *current);
@@ -1062,61 +1136,37 @@ int wmain(const int argc, wchar_t* argv[]) {
             L" is not available at " +
             std::to_wstring(targetRefreshHz) + L" Hz and " +
             std::to_wstring(current->dmBitsPerPel) +
-            L"-bit desktop color depth; switching was cancelled.\n\n"
-            L"The current display mode was left unchanged.";
-        std::wcerr << error << L'\n';
-        ShowShortcutError(suppressErrorDialog, error);
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+            L"-bit desktop color depth; switching was cancelled.";
+        return fail(error);
     }
 
 
     NvidiaColorState originalColor;
     std::wstring colorError;
     if (!NvidiaColorControl::ReadPrimary(originalColor, colorError)) {
-        std::wcerr
-            << L"Error: current NVIDIA color settings could not be read; "
-               L"switching was cancelled: "
-            << colorError << L'\n';
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+        return fail(L"Error: current NVIDIA color settings could not be read; switching was cancelled: " + colorError);
     }
     if (!NvidiaColorControl::IsSupportedOnPrimary(originalColor, colorError)) {
-        std::wcerr
-            << L"Error: the NVIDIA driver did not confirm the current color "
-               L"settings as supported; switching was cancelled: "
-            << colorError << L'\n';
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+        return fail(L"Error: the NVIDIA driver did not confirm the current color settings as supported: " + colorError);
     }
 
     const DWORD targetDpiPercent = TargetDpiPercent(targetResolution);
     const auto displaySource = FindDatabaseDisplaySource(display->DeviceName);
     if (!displaySource) {
-        std::wcerr
-            << L"Error: Windows could not identify the primary display's "
-               L"DPI source.\n";
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+        return fail(L"Error: Windows could not identify the primary display's DPI source.");
     }
 
     const auto currentDpiScale = ReadDpiScale(*displaySource);
     if (!currentDpiScale) {
-        std::wcerr
-            << L"Error: Windows could not read the primary display scaling range.\n";
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+        return fail(L"Error: Windows could not read the primary display scaling range.");
     }
 
     const auto previewDpiRelative = RelativeDpiScaleForPercent(
         *currentDpiScale,
         targetDpiPercent);
     if (!previewDpiRelative) {
-        std::wcerr
-            << L"Error: " << targetDpiPercent
-            << L"% scaling is not supported for the primary display.\n";
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+        return fail(L"Error: " + std::to_wstring(targetDpiPercent) +
+            L"% scaling is not supported for the primary display.");
     }
 
     const auto currentDpiPercent = DpiPercentForRelativeScale(
@@ -1138,9 +1188,15 @@ int wmain(const int argc, wchar_t* argv[]) {
         std::wcout << L"DPI scaling: ";
     }
     std::wcout << targetDpiPercent << L"%\n";
+    std::wcout << (dryRun ? L"Would use power plan: " : L"Target power plan: ")
+        << DescribePowerPlan(*targetPowerPlan) << L'\n';
 
     if (dryRun) {
         return 0;
+    }
+
+    if (!prepareRollback(*displayControl, *current, originalColor)) {
+        return fail(L"Error: the original display state could not be saved; no changes made.");
     }
 
     // Use the complete mode returned by the driver. Rebuilding it from the
@@ -1161,6 +1217,7 @@ int wmain(const int argc, wchar_t* argv[]) {
             << L" Trying the enumerated mode and checking the actual result.\n";
     }
 
+    rollback.Arm();
     const LONG applyResult = ChangeDisplaySettingsExW(
         displayControl->deviceName.c_str(),
         &target,
@@ -1169,9 +1226,7 @@ int wmain(const int argc, wchar_t* argv[]) {
         nullptr);
 
     if (applyResult != DISP_CHANGE_SUCCESSFUL) {
-        std::wcerr << L"Error: " << DisplayChangeError(applyResult) << L'\n';
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+        return fail(L"Error: " + std::wstring{DisplayChangeError(applyResult)});
     }
 
     NvidiaColorState targetColor;
@@ -1206,96 +1261,65 @@ int wmain(const int argc, wchar_t* argv[]) {
         appliedMode &&
         HasResolution(*appliedMode, targetResolution) &&
         appliedMode->dmDisplayFrequency == targetRefreshHz &&
-        appliedMode->dmBitsPerPel == current->dmBitsPerPel;
+        appliedMode->dmBitsPerPel == current->dmBitsPerPel &&
+        appliedMode->dmDisplayOrientation == current->dmDisplayOrientation &&
+        (appliedMode->dmDisplayFlags & DM_INTERLACED) == (current->dmDisplayFlags & DM_INTERLACED);
 
     if (!colorPreserved || !modePreserved) {
-        std::wstring restoreError;
-        const bool restored = RestoreOriginalDisplayState(
-            displayControl->deviceName.c_str(),
-            *originalControlMode,
-            originalColor,
-            *displaySource,
-            currentDpiScale->currentScaleRel,
-            restoreError);
-
         if (!modePreserved) {
-            std::wcerr
-                << L"Error: the driver did not apply the requested refresh rate "
-                   L"and desktop color depth; switching was rolled back.\n";
-        } else {
-            std::wcerr
-                << L"Error: the target mode cannot preserve the current NVIDIA "
-                   L"color settings; switching was rolled back: "
-                << colorError << L'\n';
+            return fail(L"Error: the driver did not retain the requested display mode, refresh rate or color depth.");
         }
-        if (!restored) {
-            std::wcerr << L"Error: " << restoreError << L".\n";
-        }
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+        return fail(L"Error: the target mode cannot preserve the current NVIDIA color settings: " + colorError);
     }
 
     // The recommended DPI baseline can change with the active resolution, so
     // recalculate the relative scale after the display mode is applied.
-    const auto appliedDpiScale = ReadDpiScale(*displaySource);
-    const auto targetDpiRelative = appliedDpiScale
-        ? RelativeDpiScaleForPercent(*appliedDpiScale, targetDpiPercent)
-        : std::nullopt;
-    if (!targetDpiRelative || !SetDpiScale(*displaySource, *targetDpiRelative)) {
-        std::wstring restoreError;
-        const bool restored = RestoreOriginalDisplayState(
-            displayControl->deviceName.c_str(),
-            *originalControlMode,
-            originalColor,
-            *displaySource,
-            currentDpiScale->currentScaleRel,
-            restoreError);
-        std::wcerr
-            << L"Error: Windows could not set the display scaling to "
-            << targetDpiPercent << L"%.\n";
-        if (!restored) {
-            std::wcerr << L"Error: " << restoreError << L".\n";
-        }
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+    if (!SetDpiPercentAndVerify(*displaySource, targetDpiPercent)) {
+        return fail(L"Error: Windows could not set and verify display scaling at " +
+            std::to_wstring(targetDpiPercent) + L"%.");
     }
 
     const auto finalMode = ReadCurrentMode(display->DeviceName);
+    const auto finalDpi = ReadDpiScale(*displaySource);
+    const auto finalConfiguration = ReadDisplayConfiguration(QDC_ONLY_ACTIVE_PATHS);
     NvidiaColorState finalColor;
     const bool finalStatePreserved =
         finalMode &&
         HasResolution(*finalMode, targetResolution) &&
         finalMode->dmDisplayFrequency == targetRefreshHz &&
         finalMode->dmBitsPerPel == current->dmBitsPerPel &&
+        finalMode->dmDisplayOrientation == current->dmDisplayOrientation &&
+        (finalMode->dmDisplayFlags & DM_INTERLACED) == (current->dmDisplayFlags & DM_INTERLACED) &&
+        finalDpi && DpiPercentForRelativeScale(*finalDpi, finalDpi->currentScaleRel) == targetDpiPercent &&
+        finalConfiguration && ContainsDisplayViews(snapshot->protectedViews, *finalConfiguration) &&
         NvidiaColorControl::ReadPrimary(finalColor, colorError, 20) &&
         NvidiaColorControl::Equivalent(finalColor, originalColor);
     if (!finalStatePreserved) {
-        std::wstring restoreError;
-        const bool restored = RestoreOriginalDisplayState(
-            displayControl->deviceName.c_str(),
-            *originalControlMode,
-            originalColor,
-            *displaySource,
-            currentDpiScale->currentScaleRel,
-            restoreError);
-        std::wcerr
-            << L"Error: the final display state did not retain the requested "
-               L"refresh rate and original NVIDIA color settings; switching "
-               L"was rolled back.\n";
-        if (!restored) {
-            std::wcerr << L"Error: " << restoreError << L".\n";
-        }
-        WaitWhenOpenedDirectly(openedDirectly, false);
-        return 1;
+        return fail(L"Error: the final display state did not retain the requested mode, scaling, NVIDIA colors or independent displays.");
     }
 
+    if (!ActivatePowerPlan(WindowsPowerPlans(), *targetPowerPlan, powerError)) {
+        const std::wstring error = L"Error: "
+            L"power-plan activation failed: " + powerError;
+        return fail(error);
+    }
+
+    rollback.Commit();
+    switchLock.Release();
     if (!NotifySettingsChange()) {
-        std::wcerr
-            << L"Warning: Windows did not acknowledge the scaling change; "
-               L"sign out or restart may be required.\n";
+        std::wcerr << L"Warning: Windows could not queue the scaling notification; "
+            L"sign out or restart may be required.\n";
     }
-
-    std::wcout << L"Done.\n";
+    std::wcout << L"Power plan: " << DescribePowerPlan(*targetPowerPlan) << L"\nDone.\n";
     WaitWhenOpenedDirectly(openedDirectly, true);
     return 0;
+}
+
+int wmain(const int argc, wchar_t* argv[]) {
+    try {
+        return RunProgram(argc, argv);
+    } catch (const std::exception& error) {
+        std::cerr << "Error: unexpected failure: " << error.what() << '\n';
+        return 1;
+    }
 }

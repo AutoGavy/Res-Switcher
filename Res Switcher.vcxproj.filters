@@ -21,7 +21,22 @@
     <ClCompile Include="nv_color_state.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="power_plan.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="display_config.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClInclude Include="nv_color_state.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="power_plan.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="display_config.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="switch_safety.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ResourceCompile Include="res.rc">
