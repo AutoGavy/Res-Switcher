@@ -825,6 +825,7 @@ void PrintHelp() {
         << L"  Ultimate Performance  Lower resolutions.\n\n"
         << L"Options:\n"
         << L"  --restore-4k  Ensure 3840x2160 at 240 Hz, without prompts.\n"
+        << L"                Alias: -restore4K. Always use Balanced.\n"
         << L"                Already at this mode: leave the display unchanged\n"
         << L"                and ensure the Balanced power plan is active.\n"
         << L"  -battery      Restore 4K at 240 Hz, then toggle Balanced and\n"
@@ -850,7 +851,7 @@ int RunProgram(const int argc, wchar_t* argv[]) {
         const std::wstring_view argument{argv[index]};
         if (argument == L"--dry-run") {
             dryRun = true;
-        } else if (argument == L"--restore-4k") {
+        } else if (argument == L"--restore-4k" || argument == L"-restore4K") {
             if (restore4k) {
                 std::wcerr << L"Error: specify --restore-4k only once.\n";
                 return 2;
@@ -957,7 +958,8 @@ int RunProgram(const int argc, wchar_t* argv[]) {
     const auto targetPowerPlan = batteryMode
         ? FindToggledPowerPlan(WindowsPowerPlans(), powerError)
         : FindPowerPlan(WindowsPowerPlans(),
-            PowerPlanForResolution(targetResolution.width, targetResolution.height), powerError);
+            restore4k ? PowerPlanKind::Balanced :
+                PowerPlanForResolution(targetResolution.width, targetResolution.height), powerError);
     if (!targetPowerPlan) {
         const std::wstring error = L"Error: " + powerError +
             L"\nThe display and power plan were left unchanged.";

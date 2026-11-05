@@ -38,7 +38,8 @@ The switch is cancelled if the target 240 Hz mode is unavailable at the current
 desktop color depth, or the NVIDIA color settings cannot be preserved.
 
 Use `"Res Switcher.exe" --restore-4k` to ensure `3840x2160 @ 240 Hz` without
-prompts. If already at this mode, it leaves the display unchanged and ensures
+prompts (`-restore4K` is an alias). This mode always selects Balanced, not a
+power-plan toggle. If already at this mode, it leaves the display unchanged and ensures
 Balanced is active. Otherwise it restores this mode with 150% scaling and
 activates Balanced. An already active plan is not reapplied. Exit code 0 means
 success; nonzero means failure. Add `--dry-run` to preview only.

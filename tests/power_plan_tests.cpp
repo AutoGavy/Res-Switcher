@@ -186,6 +186,21 @@ void TestToggle() {
     }
 }
 
+void TestRestoreBalanced() {
+    FakeBackend api;
+    api.active = kUltimateCopy;
+    std::wstring error;
+    const auto target = FindPowerPlan(api, PowerPlanKind::Balanced, error);
+    Require(target && IsEqualGUID(target->id, kBalancedCopy),
+        "Restore 4K always selects Balanced even when Ultimate is active");
+    Require(api.writes.empty(), "Restore preview does not activate Balanced");
+    Require(ActivatePowerPlan(api, *target, error), "Restore the Balanced plan");
+    Require(IsEqualGUID(api.active, kBalancedCopy) && api.writes.size() == 1,
+        "Restore activates Balanced exactly once");
+    Require(ActivatePowerPlan(api, *target, error) && api.writes.size() == 1,
+        "Repeated restore keeps Balanced instead of toggling back to Ultimate");
+}
+
 void TestActivation() {
     const PowerPlan plan{kBalancedCopy, PowerPlanKind::Balanced};
     std::wstring error;
@@ -252,6 +267,7 @@ int main() {
     try {
         TestLookup();
         TestToggle();
+        TestRestoreBalanced();
         TestActivation();
         std::cout << "Power plan tests passed (mock backend; no system changes).\n";
         return 0;

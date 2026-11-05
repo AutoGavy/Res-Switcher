@@ -313,9 +313,13 @@ void TestBatteryArguments() {
     Check(rejected({L"-battery", L"-battery"}), "Reject duplicate battery mode");
     Check(rejected({L"-battery", L"--restore-4k"}), "Reject battery plus explicit restore");
     Check(rejected({L"--restore-4k", L"-battery"}), "Reject restore plus battery in either order");
+    Check(rejected({L"-restore4K", L"-battery"}), "Restore alias cannot toggle power plans");
+    Check(rejected({L"--restore-4k", L"-restore4K"}), "Reject duplicate restore aliases");
+    Check(rejected({L"-restore4K", L"-restore4K"}), "Reject repeated restore alias");
     for (const auto* resolution : {L"-1050", L"-1080", L"-1440"}) {
         Check(rejected({L"-battery", resolution}), "Reject battery plus resolution");
         Check(rejected({resolution, L"-battery"}), "Reject resolution plus battery in either order");
+        Check(rejected({L"-restore4K", resolution}), "Restore alias cannot toggle resolutions");
     }
 }
 }
