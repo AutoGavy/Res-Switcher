@@ -114,6 +114,78 @@ void TestLookup() {
     Require(!FindPowerPlan(api, PowerPlanKind::Balanced, error), "Active plan read failure");
 }
 
+void TestToggle() {
+    std::wstring error = L"stale error";
+    {
+        FakeBackend api;
+        api.active = kBalancedCopy;
+        auto next = FindToggledPowerPlan(api, error);
+        Require(next && next->kind == PowerPlanKind::UltimatePerformance &&
+            IsEqualGUID(next->id, kUltimateCopy), "Balanced toggles to Ultimate");
+        Require(api.reads == 1 && api.writes.empty() && error.empty(),
+            "Resolve from one original-plan snapshot without activating");
+        Require(ActivatePowerPlan(api, *next, error), "Apply Balanced-to-Ultimate toggle");
+        next = FindToggledPowerPlan(api, error);
+        Require(next && next->kind == PowerPlanKind::Balanced &&
+            IsEqualGUID(next->id, kBalancedCopy), "Ultimate toggles back to Balanced");
+        Require(ActivatePowerPlan(api, *next, error), "Apply Ultimate-to-Balanced toggle");
+        Require(api.writes.size() == 2 && IsEqualGUID(api.active, kBalancedCopy),
+            "Two toggles return to the original plan with no intermediate activation");
+    }
+    {
+        FakeBackend api;
+        const auto next = FindToggledPowerPlan(api, error);
+        Require(next && next->kind == PowerPlanKind::Balanced,
+            "Other active plans switch to Balanced");
+        Require(api.writes.empty(), "Preview never activates a plan");
+        api.active = kAnotherCopy;
+        Require(FindToggledPowerPlan(api, error)->kind == PowerPlanKind::Balanced,
+            "Unknown active GUID switches to Balanced");
+    }
+    {
+        FakeBackend api;
+        api.schemes = {{kStandardBalanced, L"Renamed"}, {kStandardUltimate, L"Renamed"}};
+        api.active = kStandardBalanced;
+        const auto next = FindToggledPowerPlan(api, error);
+        Require(next && IsEqualGUID(next->id, kStandardUltimate), "Recognize standard Balanced GUID");
+        api.active = kStandardUltimate;
+        Require(IsEqualGUID(FindToggledPowerPlan(api, error)->id, kStandardBalanced),
+            "Recognize standard Ultimate GUID");
+        api.schemes = {{kBalancedCopy, L"  bALanCED\t"}, {kUltimateCopy, L"Ultimate Performance"}};
+        api.active = kBalancedCopy;
+        Require(IsEqualGUID(FindToggledPowerPlan(api, error)->id, kUltimateCopy),
+            "Recognize English custom plans with whitespace and case folding");
+    }
+    {
+        FakeBackend api;
+        api.schemes.push_back({kAnotherCopy, L"Balanced"});
+        Require(!FindToggledPowerPlan(api, error) && api.writes.empty(),
+            "Reject ambiguous destination names before changing anything");
+        api.active = kAnotherCopy;
+        const auto next = FindToggledPowerPlan(api, error);
+        Require(next && IsEqualGUID(next->id, kUltimateCopy),
+            "Active Balanced copy is recognized even with duplicate source names");
+        api.schemes = {{kBalancedCopy, L"Balanced"}};
+        api.active = kBalancedCopy;
+        Require(!FindToggledPowerPlan(api, error) && !error.empty() && api.writes.empty(),
+            "Missing Ultimate cancels Balanced-to-Ultimate toggle");
+        api.schemes = {{kUltimateCopy, L"Ultimate Performance"}};
+        api.active = kUltimateCopy;
+        Require(!FindToggledPowerPlan(api, error) && api.writes.empty(),
+            "Missing Balanced cancels Ultimate-to-Balanced toggle");
+    }
+    {
+        FakeBackend api;
+        api.enumerateError = ERROR_ACCESS_DENIED;
+        Require(!FindToggledPowerPlan(api, error) && api.reads == 0 && api.writes.empty(),
+            "Enumeration failure cancels toggle without activation");
+        api.enumerateError = ERROR_SUCCESS;
+        api.failRead = 1;
+        Require(!FindToggledPowerPlan(api, error) && api.writes.empty(),
+            "Unreadable original plan cancels toggle without activation");
+    }
+}
+
 void TestActivation() {
     const PowerPlan plan{kBalancedCopy, PowerPlanKind::Balanced};
     std::wstring error;
@@ -179,6 +251,7 @@ void TestActivation() {
 int main() {
     try {
         TestLookup();
+        TestToggle();
         TestActivation();
         std::cout << "Power plan tests passed (mock backend; no system changes).\n";
         return 0;

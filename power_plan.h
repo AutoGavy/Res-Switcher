@@ -38,5 +38,9 @@ const wchar_t* PowerPlanLabel(PowerPlanKind kind);
 std::wstring DescribePowerPlan(const PowerPlan& plan);
 std::optional<PowerPlan> FindPowerPlan(
     PowerPlanBackend& backend, PowerPlanKind kind, std::wstring& error);
+// Balanced -> Ultimate Performance; any other active plan -> Balanced.
+// Resolves the destination without activating it, before any display changes.
+std::optional<PowerPlan> FindToggledPowerPlan(
+    PowerPlanBackend& backend, std::wstring& error);
 bool ActivatePowerPlan(
     PowerPlanBackend& backend, const PowerPlan& plan, std::wstring& error);

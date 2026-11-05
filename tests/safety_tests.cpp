@@ -2,8 +2,10 @@
 
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 // Exercise the NVAPI loader policy with a loader that never loads any DLL.
 DWORD observedLoadFlags = 0;
@@ -15,11 +17,42 @@ HMODULE WINAPI TestLoadLibrary(LPCWSTR, HANDLE, DWORD flags) {
 #include "../nv_color_state.cpp"
 #undef LoadLibraryExW
 
+// Verify the success banner without changing a real console or waiting.
+bool testingBatteryResult = false;
+bool batteryConsoleAvailable = true;
+bool batteryColorSucceeds = true;
+constexpr WORD batteryOriginalColor = BACKGROUND_RED |
+    FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+std::vector<WORD> batteryColors;
+std::vector<DWORD> batteryWaits;
+
+BOOL WINAPI TestConsoleInfo(HANDLE output, PCONSOLE_SCREEN_BUFFER_INFO info) {
+    if (!testingBatteryResult) { return GetConsoleScreenBufferInfo(output, info); }
+    *info = {};
+    info->wAttributes = batteryOriginalColor;
+    return batteryConsoleAvailable ? TRUE : FALSE;
+}
+BOOL WINAPI TestConsoleColor(HANDLE output, WORD attributes) {
+    if (!testingBatteryResult) { return SetConsoleTextAttribute(output, attributes); }
+    batteryColors.push_back(attributes);
+    return batteryColorSucceeds ? TRUE : FALSE;
+}
+void WINAPI TestResultSleep(DWORD milliseconds) {
+    if (!testingBatteryResult) { Sleep(milliseconds); return; }
+    batteryWaits.push_back(milliseconds);
+}
+
 // Include pure mode/DPI helpers and argument handling, without using the app's
 // entry point. These tests never run a display/power apply function.
+#define GetConsoleScreenBufferInfo TestConsoleInfo
+#define SetConsoleTextAttribute TestConsoleColor
+#define Sleep TestResultSleep
 #define wmain UnusedApplicationEntryPoint
 #include "../main.cpp"
 #undef wmain
+#undef Sleep
+#undef SetConsoleTextAttribute
+#undef GetConsoleScreenBufferInfo
 
 namespace {
 void Check(bool value, const char* message) {
@@ -233,6 +266,58 @@ void TestDpiAndColors() {
     Check(!session.Open(error) && observedLoadFlags == LOAD_LIBRARY_SEARCH_SYSTEM32,
         "Never load NVAPI from the application directory or current directory");
 }
+
+void TestBatteryResult() {
+    const auto capture = [](PowerPlanKind kind, bool hasConsole, bool colorSucceeds) {
+        batteryColors.clear();
+        batteryWaits.clear();
+        batteryConsoleAvailable = hasConsole;
+        batteryColorSucceeds = colorSucceeds;
+        std::wostringstream output;
+        auto* original = std::wcout.rdbuf(output.rdbuf());
+        testingBatteryResult = true;
+        ShowBatteryResult(kind);
+        testingBatteryResult = false;
+        std::wcout.rdbuf(original);
+        return output.str();
+    };
+    for (const auto kind : {PowerPlanKind::Balanced, PowerPlanKind::UltimatePerformance}) {
+        const auto text = capture(kind, true, true);
+        const std::wstring expected = std::wstring{L"Current power plan: "} + PowerPlanLabel(kind);
+        Check(text.find(expected) != std::wstring::npos, "English success label and active plan name");
+        Check(text.find(L"==================================================") != std::wstring::npos,
+            "Prominent success banner");
+        Check(batteryColors == std::vector<WORD>{
+            BACKGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY, batteryOriginalColor},
+            "Highlight only the plan in bright green, preserve background, restore original color");
+        Check(batteryWaits == std::vector<DWORD>{1000}, "Hold the flushed success result for exactly 1 second");
+    }
+    const auto redirected = capture(PowerPlanKind::Balanced, false, true);
+    Check(redirected.find(L"Current power plan: Balanced") != std::wstring::npos && batteryColors.empty(),
+        "Redirected output stays readable without color calls or escape sequences");
+    capture(PowerPlanKind::Balanced, true, false);
+    Check(batteryColors.size() == 1 && batteryWaits == std::vector<DWORD>{1000},
+        "Color failure still displays the result and pauses");
+}
+
+void TestBatteryArguments() {
+    const auto rejected = [](std::initializer_list<const wchar_t*> arguments) {
+        std::vector<std::wstring> storage{L"Res Switcher.exe", L"--dry-run"};
+        for (const auto* argument : arguments) { storage.emplace_back(argument); }
+        std::vector<wchar_t*> argv;
+        for (auto& argument : storage) { argv.push_back(argument.data()); }
+        // Even if argument validation regresses, the extra --dry-run prevents
+        // these tests from ever changing the real display or power plan.
+        return RunProgram(static_cast<int>(argv.size()), argv.data()) == 2;
+    };
+    Check(rejected({L"-battery", L"-battery"}), "Reject duplicate battery mode");
+    Check(rejected({L"-battery", L"--restore-4k"}), "Reject battery plus explicit restore");
+    Check(rejected({L"--restore-4k", L"-battery"}), "Reject restore plus battery in either order");
+    for (const auto* resolution : {L"-1050", L"-1080", L"-1440"}) {
+        Check(rejected({L"-battery", resolution}), "Reject battery plus resolution");
+        Check(rejected({resolution, L"-battery"}), "Reject resolution plus battery in either order");
+    }
+}
 }
 
 int main(int argc, char* argv[]) {
@@ -254,6 +339,8 @@ int main(int argc, char* argv[]) {
         TestTopologyPreservation();
         TestRollbackAndLock();
         TestDpiAndColors();
+        TestBatteryArguments();
+        TestBatteryResult();
         std::cout << "Safety tests passed (mock CCD/DLL calls; no display or power changes).\n";
         return 0;
     } catch (const std::exception& error) {

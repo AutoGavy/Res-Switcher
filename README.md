@@ -9,6 +9,7 @@ A small Windows command-line tool that switches the primary display between
 "Res Switcher.exe" -1050   # 1680x1050 <-> 3840x2160
 "Res Switcher.exe" -1080   # 1920x1080 <-> 3840x2160
 "Res Switcher.exe" -1440   # 2560x1440 <-> 3840x2160
+"Res Switcher.exe" -battery # Restore 4K @ 240 Hz + toggle power plan
 ```
 
 Add `--dry-run` to preview the change. Without a resolution option, the program
@@ -41,6 +42,15 @@ prompts. If already at this mode, it leaves the display unchanged and ensures
 Balanced is active. Otherwise it restores this mode with 150% scaling and
 activates Balanced. An already active plan is not reapplied. Exit code 0 means
 success; nonzero means failure. Add `--dry-run` to preview only.
+
+Use `"Res Switcher.exe" -battery` to restore the same 4K mode and toggle
+**Balanced <-> Ultimate Performance** instead of always selecting Balanced.
+Other active power plans switch to Balanced. If already at 4K @ 240 Hz, only
+the power plan changes. If restoring 4K fails, the power plan is not toggled.
+After success, it shows `Current power plan: NAME` with the plan name in green
+and keeps the window open for 1 second. This mode runs without prompts,
+supports `--dry-run` (no delay), and cannot be combined with `--restore-4k`
+or a resolution option.
 
 ## Restore at sign-in
 

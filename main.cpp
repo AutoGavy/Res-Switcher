@@ -773,6 +773,26 @@ void WaitWhenOpenedDirectly(const bool shouldWait, const bool success) {
     std::wcin.get();
 }
 
+void ShowBatteryResult(const PowerPlanKind kind) {
+    const HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    const bool hasConsole = GetConsoleScreenBufferInfo(output, &info) != FALSE;
+
+    std::wcout << L"\n==================================================\n"
+        << L"  Current power plan: " << std::flush;
+    const WORD foregroundMask = FOREGROUND_RED | FOREGROUND_GREEN |
+        FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+    const WORD green = static_cast<WORD>((info.wAttributes & ~foregroundMask) |
+        FOREGROUND_GREEN | FOREGROUND_INTENSITY);
+    const bool highlighted = hasConsole && SetConsoleTextAttribute(output, green) != FALSE;
+    std::wcout << PowerPlanLabel(kind) << std::flush;
+    if (highlighted) {
+        SetConsoleTextAttribute(output, info.wAttributes);
+    }
+    std::wcout << L"\n==================================================\n" << std::flush;
+    Sleep(1000);
+}
+
 void ShowShortcutError(const bool suppressDialog, const std::wstring& message) {
     if (suppressDialog) {
         return;
@@ -807,6 +827,11 @@ void PrintHelp() {
         << L"  --restore-4k  Ensure 3840x2160 at 240 Hz, without prompts.\n"
         << L"                Already at this mode: leave the display unchanged\n"
         << L"                and ensure the Balanced power plan is active.\n"
+        << L"  -battery      Restore 4K at 240 Hz, then toggle Balanced and\n"
+        << L"                Ultimate Performance, without prompts. Other active\n"
+        << L"                plans switch to Balanced. Already at 4K at 240 Hz:\n"
+        << L"                leave the display unchanged; only toggle the plan.\n"
+        << L"                Show the current plan in green for 1 second on success.\n"
         << L"  --dry-run  Preview only; do not change the display or power plan.\n"
         << L"  --help     Show this help text.\n";
 }
@@ -817,6 +842,7 @@ int RunProgram(const int argc, wchar_t* argv[]) {
     const bool openedDirectly = argc == 1;
     bool dryRun = false;
     bool restore4k = false;
+    bool batteryMode = false;
     Resolution lowerResolution = kDefaultLowerResolution;
     bool hasResolutionOption = false;
 
@@ -830,6 +856,12 @@ int RunProgram(const int argc, wchar_t* argv[]) {
                 return 2;
             }
             restore4k = true;
+        } else if (argument == L"-battery") {
+            if (batteryMode) {
+                std::wcerr << L"Error: specify -battery only once.\n";
+                return 2;
+            }
+            batteryMode = true;
         } else if (argument == L"--help" || argument == L"-h") {
             PrintHelp();
             return 0;
@@ -858,12 +890,17 @@ int RunProgram(const int argc, wchar_t* argv[]) {
         }
     }
 
-    if (restore4k && hasResolutionOption) {
-        std::wcerr
-            << L"Error: --restore-4k cannot be combined with a resolution option.\n";
+    if (restore4k && batteryMode) {
+        std::wcerr << L"Error: -battery cannot be combined with --restore-4k.\n";
         return 2;
     }
-    const bool suppressErrorDialog = openedDirectly || restore4k || dryRun;
+    const bool ensure4k = restore4k || batteryMode;
+    if (ensure4k && hasResolutionOption) {
+        std::wcerr
+            << L"Error: --restore-4k and -battery cannot be combined with a resolution option.\n";
+        return 2;
+    }
+    const bool suppressErrorDialog = openedDirectly || ensure4k || dryRun;
 
     SwitchLock switchLock;
     if (!switchLock.Acquired()) {
@@ -912,22 +949,22 @@ int RunProgram(const int argc, wchar_t* argv[]) {
     }
 
     const Resolution currentResolution{current->dmPelsWidth, current->dmPelsHeight};
-    const Resolution targetResolution = restore4k ? kUltraHdResolution : SelectTargetResolution(
+    const Resolution targetResolution = ensure4k ? kUltraHdResolution : SelectTargetResolution(
         currentResolution, lowerResolution, current->dmDisplayFrequency);
     const DWORD targetRefreshHz = kPreferredRefreshHz;
 
     std::wstring powerError;
-    const auto targetPowerPlan = FindPowerPlan(
-        WindowsPowerPlans(),
-        PowerPlanForResolution(targetResolution.width, targetResolution.height),
-        powerError);
+    const auto targetPowerPlan = batteryMode
+        ? FindToggledPowerPlan(WindowsPowerPlans(), powerError)
+        : FindPowerPlan(WindowsPowerPlans(),
+            PowerPlanForResolution(targetResolution.width, targetResolution.height), powerError);
     if (!targetPowerPlan) {
         const std::wstring error = L"Error: " + powerError +
             L"\nThe display and power plan were left unchanged.";
         return fail(error);
     }
 
-    if (restore4k && HasResolution(*current, kUltraHdResolution) &&
+    if (ensure4k && HasResolution(*current, kUltraHdResolution) &&
         current->dmDisplayFrequency == kPreferredRefreshHz) {
         PrintMode(L"Current: ", *current);
         std::wcout << L"Already at 3840x2160 @ 240 Hz; no display changes needed.\n";
@@ -935,8 +972,13 @@ int RunProgram(const int argc, wchar_t* argv[]) {
             std::wcerr << L"Error: " << powerError << L'\n';
             return 1;
         }
-        std::wcout << (dryRun ? L"Would use power plan: " : L"Power plan: ")
-            << DescribePowerPlan(*targetPowerPlan) << L'\n';
+        if (batteryMode && !dryRun) {
+            switchLock.Release();
+            ShowBatteryResult(targetPowerPlan->kind);
+        } else {
+            std::wcout << (dryRun ? L"Would use power plan: " : L"Power plan: ")
+                << DescribePowerPlan(*targetPowerPlan) << L'\n';
+        }
         return 0;
     }
 
@@ -1310,8 +1352,12 @@ int RunProgram(const int argc, wchar_t* argv[]) {
         std::wcerr << L"Warning: Windows could not queue the scaling notification; "
             L"sign out or restart may be required.\n";
     }
-    std::wcout << L"Power plan: " << DescribePowerPlan(*targetPowerPlan) << L"\nDone.\n";
-    WaitWhenOpenedDirectly(openedDirectly, true);
+    if (batteryMode) {
+        ShowBatteryResult(targetPowerPlan->kind);
+    } else {
+        std::wcout << L"Power plan: " << DescribePowerPlan(*targetPowerPlan) << L"\nDone.\n";
+        WaitWhenOpenedDirectly(openedDirectly, true);
+    }
     return 0;
 }
 

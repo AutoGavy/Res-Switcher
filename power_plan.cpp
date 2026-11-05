@@ -102,41 +102,24 @@ bool NameMatches(std::wstring_view name, PowerPlanKind kind) {
             NameEquals(name, L"\u5353\u8d8a\u6027\u80fd");
 }
 
-} // namespace
-
-PowerPlanBackend& WindowsPowerPlans() {
-    static WindowsBackend backend;
-    return backend;
-}
-
-const wchar_t* PowerPlanLabel(PowerPlanKind kind) {
-    return kind == PowerPlanKind::Balanced ? L"Balanced" : L"Ultimate Performance";
-}
-
-std::wstring DescribePowerPlan(const PowerPlan& plan) {
-    wchar_t id[39]{};
-    if (StringFromGUID2(plan.id, id, ARRAYSIZE(id)) == 0) {
-        return std::wstring{PowerPlanLabel(plan.kind)} + L" (GUID unavailable)";
-    }
-    return std::wstring{PowerPlanLabel(plan.kind)} + L" " + id;
-}
-
-std::optional<PowerPlan> FindPowerPlan(
-    PowerPlanBackend& backend, PowerPlanKind kind, std::wstring& error) {
+bool ReadPowerPlans(PowerPlanBackend& backend, std::vector<PowerScheme>& schemes,
+    GUID& active, std::wstring& error) {
     error.clear();
-    std::vector<PowerScheme> schemes;
     DWORD status = backend.Enumerate(schemes);
     if (status != ERROR_SUCCESS) {
         error = ApiError(L"Could not enumerate power plans", status);
-        return std::nullopt;
+        return false;
     }
-    GUID active{};
     status = backend.GetActive(active);
     if (status != ERROR_SUCCESS) {
         error = ApiError(L"Could not read the active power plan", status);
-        return std::nullopt;
+        return false;
     }
+    return true;
+}
 
+std::optional<PowerPlan> SelectPowerPlan(const std::vector<PowerScheme>& schemes,
+    const GUID& active, PowerPlanKind kind, std::wstring& error) {
     const GUID& standard = kind == PowerPlanKind::Balanced ? kBalanced : kUltimate;
     std::optional<PowerPlan> selected;
     int bestScore = 0;
@@ -165,6 +148,54 @@ std::optional<PowerPlan> FindPowerPlan(
             L". Enable this plan in Windows first; no replacement plan was created.";
     }
     return selected;
+}
+
+} // namespace
+
+PowerPlanBackend& WindowsPowerPlans() {
+    static WindowsBackend backend;
+    return backend;
+}
+
+const wchar_t* PowerPlanLabel(PowerPlanKind kind) {
+    return kind == PowerPlanKind::Balanced ? L"Balanced" : L"Ultimate Performance";
+}
+
+std::wstring DescribePowerPlan(const PowerPlan& plan) {
+    wchar_t id[39]{};
+    if (StringFromGUID2(plan.id, id, ARRAYSIZE(id)) == 0) {
+        return std::wstring{PowerPlanLabel(plan.kind)} + L" (GUID unavailable)";
+    }
+    return std::wstring{PowerPlanLabel(plan.kind)} + L" " + id;
+}
+
+std::optional<PowerPlan> FindPowerPlan(
+    PowerPlanBackend& backend, PowerPlanKind kind, std::wstring& error) {
+    std::vector<PowerScheme> schemes;
+    GUID active{};
+    if (!ReadPowerPlans(backend, schemes, active, error)) {
+        return std::nullopt;
+    }
+    return SelectPowerPlan(schemes, active, kind, error);
+}
+
+std::optional<PowerPlan> FindToggledPowerPlan(
+    PowerPlanBackend& backend, std::wstring& error) {
+    std::vector<PowerScheme> schemes;
+    GUID active{};
+    if (!ReadPowerPlans(backend, schemes, active, error)) {
+        return std::nullopt;
+    }
+    // Take one snapshot before restoring 4K. Do not first activate Balanced,
+    // which would lose the original plan and always toggle to Ultimate.
+    bool balancedActive = IsEqualGUID(active, kBalanced);
+    for (const auto& scheme : schemes) {
+        if (IsEqualGUID(scheme.id, active) && NameMatches(scheme.name, PowerPlanKind::Balanced)) {
+            balancedActive = true;
+        }
+    }
+    return SelectPowerPlan(schemes, active, balancedActive
+        ? PowerPlanKind::UltimatePerformance : PowerPlanKind::Balanced, error);
 }
 
 bool ActivatePowerPlan(
